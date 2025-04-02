@@ -15,6 +15,9 @@ objects in other methods such as levelling or feature extraction routines.
 from abc import ABC, abstractmethod
 import numpy as np
 
+import scipy
+import scipy.ndimage
+
 from surfile import geometry, profile, surface, funct
 
 import matplotlib.pyplot as plt
@@ -393,3 +396,31 @@ class HistCutter(Cutter, ABC):
         plt.show()
 
         return span.extents
+
+
+class SurfaceExtender(Cutter, ABC):
+    @staticmethod
+    def extend(obj: surface.Surface, pixel_x, pixel_y, mode='reflect'):
+        """
+        Cuts the surface on the Z axis keeping only the
+        points with an height included in the selection
+
+        Parameters
+        ----------
+        obj : surface.Surface
+            The surface object on wich the extend is applied
+        pixel_x,y : int
+            The number of pixel used to extend the image
+
+        Returns
+        ----------
+        extents (zmin, zmax):  (float, ...)
+            The cut values
+        """
+        total_pix_x = len(obj.x) + pixel_x
+        total_pix_y = len(obj.x) + pixel_y
+        
+        z_extended = np.pad(obj.Z, (pixel_x, pixel_y), mode=mode)
+        
+        obj.setValues(obj.dx, obj.dy, z_extended)
+        

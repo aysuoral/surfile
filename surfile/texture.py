@@ -139,11 +139,11 @@ class Psd:
         fx = fx * dfx
         fy = fy * dfy
 
-        print(f'Sq = {np.sqrt(np.sum(Z * Z) / (np.float64(Nx * Ny)))}')
-        print(f'dfx: {dfx} dfy: {dfy}')
-        print(f'from PSD: {np.sqrt(np.sum(RePSD * dfx * dfy))} Lx*Ly = {Lx * Ly} Lx = {Lx} Ly = {Ly}')
-        print(f'Rq x: {np.sqrt(np.sum(np.mean(RePSDx, axis=0) * dfx))}')
-        print(f'Rq y: {np.sqrt(np.sum(np.mean(RePSDy, axis=1) * dfy))}')
+        # print(f'Sq = {np.sqrt(np.sum(Z * Z) / (np.float64(Nx * Ny)))}')
+        # print(f'dfx: {dfx} dfy: {dfy}')
+        # print(f'from PSD: {np.sqrt(np.sum(RePSD * dfx * dfy))} Lx*Ly = {Lx * Ly} Lx = {Lx} Ly = {Ly}')
+        # print(f'Rq x: {np.sqrt(np.sum(np.mean(RePSDx, axis=0) * dfx))}')
+        # print(f'Rq y: {np.sqrt(np.sum(np.mean(RePSDy, axis=1) * dfy))}')
 
         # definition of PSD is Fourier*conj(Fourier) * Lx *Ly
         # PSD has dimension length^4
@@ -276,7 +276,8 @@ class Psd:
             plt.show()
 
         return PSDr, PSDav, fr, fr0
-
+    
+    @funct.options(bplt=True, csvPath='out\\')
     def averageSpectra(self, bplt=False):
         """
         Calculate the average specra in the x and y directions
@@ -400,7 +401,7 @@ def __appendSpherical_np(xyz):
     return thetas, phis
 
 
-@funct.options(bplt=True, csvPath='out\\')
+# @funct.options(bplt=True, csvPath='out\\')
 def slopeDistribution(obj: surface.Surface, structured=False, theta_res=1, phi_res=1, adaptive_hist=False, bplt=False):
     """
     Calculates the slope distribution in angles theta and phi
@@ -473,7 +474,7 @@ def slopeDistribution(obj: surface.Surface, structured=False, theta_res=1, phi_r
 
     thetas, phis = __appendSpherical_np(normals)
 
-    print(f'Slope Distribution:\nTheta:\t{st.describe(thetas)}\nPhi:\t{st.describe(phis)}')
+    # print(f'Slope Distribution:\nTheta:\t{st.describe(thetas)}\nPhi:\t{st.describe(phis)}')
 
     if not adaptive_hist:
         max_theta = 90

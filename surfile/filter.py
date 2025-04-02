@@ -304,7 +304,7 @@ class SurfaceGaussian(Filter):
         self.filter(obj, cutoff=self.cutoff, bplt=bplt)
 
     @staticmethod
-    def filter(obj: surface.Surface, cutoff, bplt=False):
+    def filter(obj: surface.Surface, cutoff, type='roughness', bplt=False):
         """
         Applies to a surface object a gaussian filter ISO 16610-21.
         The resulting profile is cut at the borders to avoid border effects.
@@ -316,6 +316,8 @@ class SurfaceGaussian(Filter):
             The surface object on wich the filter is applied
         cutoff: float
             The cutoff of the gaussian filter
+        type: str
+            'roughness' or 'waviness' -> at the end obj contains the specified component
         bplt: bool
             Plots the envelope of the filter if true
         """
@@ -330,10 +332,16 @@ class SurfaceGaussian(Filter):
         gk = np.zeros((nl, ml))
         for iy in range(0, nl):
             for ix in range(0, ml):
-                gk[iy][ix] = np.exp(-np.pi * (xconv[ix] ** 2 + yconv[iy] ** 2) / (alpha * cutoff) ** 2) / (alpha * cutoff)
+                gk[iy][ix] = np.exp(-np.pi * (xconv[ix] ** 2 + yconv[iy] ** 2) / (alpha * cutoff) ** 2) / ((alpha * cutoff) ** 2)
         gk = gk / np.sum(gk)
         envelope = signal.convolve2d(obj.Z, gk, 'same')
-        obj.Z = obj.Z - envelope
+        
+        if type == 'roughness':
+            obj.Z = obj.Z - envelope
+        elif type == 'waviness':
+            obj.Z = envelope
+        else:
+            raise Exception(f'Unknown component: {type}')
 
         # TODO: very hard to see if this works correctly from the topographies
         if bplt:

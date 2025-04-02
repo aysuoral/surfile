@@ -339,7 +339,7 @@ class ProfilePolynomial(FormEstimator):
         elif bound is True:
             bound = np.mean(z)
             ind = np.argwhere(comp(z, bound)).ravel()
-            coeff = np.polyfit(x[ind], x[ind], degree)
+            coeff = np.polyfit(x[ind], z[ind], degree)
         else:
             ind = np.argwhere(comp(z, bound)).ravel()
             coeff = np.polyfit(x[ind], z[ind], degree)

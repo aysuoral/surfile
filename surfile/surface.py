@@ -43,6 +43,9 @@ class Surface:
         self.x = None
         self.rangeY = None
         self.rangeX = None
+        
+        self.dx = None
+        self.dy = None
 
         self.name = 'Figure'
 
@@ -79,6 +82,11 @@ class Surface:
             self.X, self.Y, self.Z, self.x, self.y = measfile_io.read_spaceZtxt(fname)
 
         self.X0, self.Y0, self.Z0 = copy.deepcopy(self.X), copy.deepcopy(self.Y), copy.deepcopy(self.Z)
+        self.rangeX = np.nanmax(self.x)
+        self.rangeY = np.nanmax(self.y)
+        
+        self.dx = self.rangeX / len(self.x)
+        self.dy = self.rangeY / len(self.y)
 
         if bplt: self.pltC()
 
@@ -108,6 +116,9 @@ class Surface:
         self.rangeY = n_y * dy
         self.x = np.linspace(0, self.rangeX, num=n_x)
         self.y = np.linspace(0, self.rangeY, num=n_y)
+        
+        self.dx = dx
+        self.dy = dy
 
         # create main XYZ and backup of original points in Z0
         self.X, self.Y = np.meshgrid(self.x, self.y)
@@ -118,11 +129,28 @@ class Surface:
         if bplt: self.pltC()
 
     def setValues(self, dx, dy, z_map, bplt=False):
+        """
+        Sets the values of a surface object given the spacing and the Z height map
+
+        Parameters
+        ----------
+        dx : float
+            The x spacing
+        dy : float
+            The y spacing
+        z_map : np.array
+            The z values of the topography already in the (n_x, n_y) shape
+        bplt : bool
+            If true plots the created surface
+        """
         (n_y, n_x) = z_map.shape
         self.rangeX = n_x * dx
         self.rangeY = n_y * dy
         self.x = np.linspace(0, self.rangeX, num=n_x)
         self.y = np.linspace(0, self.rangeY, num=n_y)
+        
+        self.dx = dx
+        self.dy = dy
 
         # create main XYZ and backup of original points in Z0
         self.X, self.Y = np.meshgrid(self.x, self.y)
@@ -155,7 +183,7 @@ class Surface:
         """
         def saveLine(line):
             line = line / 1000  # in um
-            line.tofile(fout, sep='\t', format='%.4f')
+            line.tofile(fout, sep='\t', format='%.8f')
             fout.write('\n')
 
         name = os.path.join(fname, self.name + '.asc') if os.path.isdir(fname) else os.path.splitext(fname)[0] + '.asc'
@@ -222,7 +250,6 @@ class Surface:
                         self.Y.reshape(np.size(self.Y))]).T
 
         Zi = interpolate.griddata(XY, self.Z.reshape(np.size(self.Z)), (Xi, Yi), method='cubic')  # 'linear' 'cubic'
-        print(np.shape(self.Z), np.shape(Zi))
 
         self.x = xi
         self.y = yi
@@ -246,10 +273,18 @@ class Surface:
         use with caution !!!</span>.
         """
         z_ma = np.ma.masked_invalid(self.Z)
-        self.Z = interpolate.griddata((self.X[~z_ma.mask], self.Y[~z_ma.mask]),
-                                      z_ma[~z_ma.mask].ravel(),
-                                      (self.X, self.Y),
-                                      method=method)
+        self.Z = interpolate.griddata((self.X[~z_ma.mask], 
+                                       self.Y[~z_ma.mask]),
+                                       z_ma[~z_ma.mask].ravel(),
+                                       (self.X, self.Y),
+                                       method=method)
+        
+    def removeNM(self):
+        """
+        Fills the NM points with the mean value of the surface
+        """
+        z_ma = np.ma.masked_invalid(self.Z)
+        self.Z[z_ma.mask] = np.nanmean(self.Z)
 
     def chauvenet(self, iterative=True, threshold=0.5, mean=None, stdv=None):
         """
@@ -334,11 +369,11 @@ class Surface:
     # PLOT SECTION  #
     #################
     @options(bplt=rcs.params['bs3_D'], save=rcs.params['ss3_D'])
-    def plt3D(self):
+    def plt3D(self, **plt_args):
         """Plots a 3D view of the surface"""
         fig = plt.figure()
         ax_3d = fig.add_subplot(111, projection='3d')
-        p = ax_3d.plot_surface(self.X, self.Y, self.Z, cmap=cm.rainbow)  # hot, viridis, rainbow
+        p = ax_3d.plot_surface(self.X, self.Y, self.Z, **plt_args)  # hot, viridis, rainbow
         funct.persFig(
             [ax_3d],
             gridcol='grey',
@@ -350,11 +385,11 @@ class Surface:
         return fig, ax_3d 
 
     @options(bplt=rcs.params['bsCom'], save=rcs.params['ssCom'])
-    def pltCompare(self):
+    def pltCompare(self, **plt_args):
         """Plots the current topography data and the original data"""
         fig, (ax, bx) = plt.subplots(nrows=1, ncols=2)
-        p1 = ax.pcolormesh(self.X0, self.Y0, self.Z0, cmap=cm.jet)  # hot, viridis, rainbow
-        p2 = bx.pcolormesh(self.X, self.Y, self.Z, cmap=cm.jet)  # hot, viridis, rainbow
+        p1 = ax.pcolormesh(self.X0, self.Y0, self.Z0, **plt_args)  # hot, viridis, rainbow
+        p2 = bx.pcolormesh(self.X, self.Y, self.Z, **plt_args)  # hot, viridis, rainbow
         fig.colorbar(p1, ax=ax)
         fig.colorbar(p2, ax=bx)
         funct.persFig(
@@ -367,11 +402,11 @@ class Surface:
         return fig, ax, bx
 
     @options(bplt=rcs.params['bsCol'], save=rcs.params['ssCol'])
-    def pltC(self):
+    def pltC(self, **plt_args):
         """Plots the topography (pcolormesh)"""
         fig = plt.figure()
         ax_2d = fig.add_subplot(111)
-        ax_2d.pcolormesh(self.X, self.Y, self.Z, cmap=cm.viridis)  # hot, viridis, rainbow
+        d = ax_2d.pcolormesh(self.X, self.Y, self.Z, **plt_args)  # hot, viridis, rainbow
         funct.persFig(
             [ax_2d],
             gridcol='grey',
@@ -381,4 +416,6 @@ class Surface:
         ax_2d.set_title(self.name)
         ax_2d.grid(False)
         ax_2d.set_aspect('equal')
+        
+        fig.colorbar(d)
         return fig, ax_2d

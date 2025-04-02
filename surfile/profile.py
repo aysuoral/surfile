@@ -241,10 +241,10 @@ class Profile:
     # PLOT SECTION  #
     #################
     @options(bplt=rcs.params['bpPrf'], save=rcs.params['spPrf'])
-    def pltPrf(self):
+    def pltPrf(self, **plt_args):
         """Plots the profile"""
         fig, ax = plt.subplots(nrows=1, ncols=1)
-        ax.plot(self.X, self.Z, color='teal')
+        ax.plot(self.X, self.Z, **plt_args)
         funct.persFig(
             [ax],
             gridcol='grey',
@@ -255,11 +255,11 @@ class Profile:
         return fig, ax
 
     @options(bplt=rcs.params['bpCom'], save=rcs.params['spCom'])
-    def pltCompare(self):
+    def pltCompare(self, **plt_args):
         """Plots the current profile and the original data"""
         fig, (ax, bx) = plt.subplots(nrows=1, ncols=2)
-        ax.plot(self.X0, self.Z0, color='teal')
-        bx.plot(self.X, self.Z, color='teal')
+        ax.plot(self.X0, self.Z0, **plt_args)
+        bx.plot(self.X, self.Z, **plt_args)
         funct.persFig(
             [ax, bx],
             gridcol='grey',
