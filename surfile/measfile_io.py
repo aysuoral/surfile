@@ -33,8 +33,8 @@ withigor = 0
 try:
     from csaps import csaps
 except ImportError:
-    print('csaps not found: use')
-    print('pip install csaps')
+    print('[WARN] csaps not found: use')
+    print('[WARN] pip install csaps')
     
 def read_microscopedata(filename, userscalecorr, interpolflag):
     """
@@ -78,8 +78,8 @@ def read_microscopedata(filename, userscalecorr, interpolflag):
             heightstr, zpiezostr, velostr = read_ibw(filename)
             measdate = measdate + '\n' + heightstr + ', v=' + 'Scanspeed: ' + velostr
         else:
-            print('ibw not readable: package igor required but not installed')
-            print('pip install igor')
+            print('[WARN] ibw not readable: package igor required but not installed')
+            print('[WARN] pip install igor')
     elif filename[fnlen - 4:fnlen].find('plu') > -1:
         # returns all data in micron
         nx, ny, dx, dy, height_map, measdate = read_plu(content)
@@ -114,7 +114,7 @@ def read_microscopedata(filename, userscalecorr, interpolflag):
             nx, ny, dx, dy, height_map, measdate = read_NMMgaoliang(content.decode('ascii'))
 
     weight_map, num_invalid = invalid_data_weight(height_map)
-    print(f'num_invalid: {num_invalid} / {height_map.size}')
+    print(f'[INFO] num_invalid: {num_invalid} / {height_map.size}')
     if (num_invalid > 0) and interpolflag:
         height_map, weight_map = interpol_csaps(height_map, weight_map, dx, dy, 0.7)
     # print('userscalecorr: ', userscalecorr)
@@ -164,7 +164,7 @@ def read_spaceZtxt(fname):
         line = fin.readline().split()
         sx = int(line[0])  # read number of x points
         sy = int(line[1])  # read number of y points
-        print(f'Pixels: {sx} x {sy}')
+        print(f'[INFO] Pixels: {sx} x {sy}')
 
         spacex = float(line[2])  # read x spacing
         spacey = float(line[3])  # read y spacing
@@ -183,6 +183,30 @@ def read_spaceZtxt(fname):
 
     return X, Y, Z, x, y
 
+def detect_csv_separator(file_path):
+    # Define the accepted separators
+    separators = [' ', '\t', ',', ';']
+    
+    # Initialize a dictionary to count occurrences of each separator
+    separator_count = {sep: 0 for sep in separators}
+    
+    # Read the first few lines of the file
+    with open(file_path, 'r', encoding='utf-8') as file:
+        # Read the first line
+        line = file.readline()
+        for sep in separators:
+            separator_count[sep] += line.count(sep)
+    
+    # Find the separator with the maximum count
+    detected_separator = max(separator_count, key=separator_count.get)
+    
+    # Check if the maximum count is greater than zero
+    if separator_count[detected_separator] > 0:
+        print("[INFO] Open txt detected separator")
+        return detected_separator
+    else:
+        raise Exception("[ERROR] Could not find separator type")
+
 def read_xyztxt(fname):
     """
     Reads a txt file with three columns [x, y, z]
@@ -197,7 +221,7 @@ def read_xyztxt(fname):
     (X, Y, Z, x, y) : tuple
         The arrays red from the file
     """
-    X, Y, Z = np.genfromtxt(fname, unpack=True, usecols=(0, 1, 2), delimiter=',')
+    X, Y, Z = np.genfromtxt(fname, unpack=True, usecols=(0, 1, 2), delimiter=detect_csv_separator(fname))
 
     # find size of array
     i = np.argwhere(Y > 0)[0][0]
@@ -258,16 +282,16 @@ def read_lextinfo(filecontent):
     infostring7 = extract_tag(filecontent, keywords[7])
     infostring8 = extract_tag(filecontent, keywords[8])
     infostring9 = extract_tag(filecontent, keywords[9])
-    print('unit  z: ', infostring7)
-    print('unit  x: ', infostring8)
-    print('unit  y: ', infostring9)
+    print('[INFO] unit  z: ', infostring7)
+    print('[INFO] unit  x: ', infostring8)
+    print('[INFO] unit  y: ', infostring9)
     tomicron = np.array([(0.001 ** int(infostring8)), (0.001 ** int(infostring9)), \
                          (0.001 ** int(infostring7))])
     infostring10 = extract_tag(filecontent, keywords[10])
     infostring11 = extract_tag(filecontent, keywords[11])
-    print('HeightMaxValue: ', int(infostring10), ', HeightMaxScalingValue: ', int(infostring11))
+    print('[INFO] HeightMaxValue: ', int(infostring10), ', HeightMaxScalingValue: ', int(infostring11))
     if int(infostring10) * int(infostring11) == 0:
-        print('attention - this is interpreted not to have the correct HeightDataUnit')
+        print('[INFO] attention - this is interpreted not to have the correct HeightDataUnit')
         print('from conversion of pior to lext format, therefore correction from mm to nm')
         print('finally delivered in micron, as usual')
         tomicron *= 1e-6
@@ -304,7 +328,7 @@ def read_lextimg(filename, nx, ny, endheightmap, heightflag):
     posbyte = []
     #    for iframe in range(0, 4):
     while frameflag:
-        print('iframe: ', iframe)
+        print('[INFO] iframe: ', iframe)
         try:
             imgs.seek(iframe)
             print(imgs.mode)
@@ -340,7 +364,7 @@ def read_lextimg(filename, nx, ny, endheightmap, heightflag):
         if (iimg == 2):
             the_map = npimg[iimg - 2]
         else:
-            print('there does not exist any intenstiy map!')
+            print('[WARN] there does not exist any intenstiy map!')
             the_map = []
     return the_map
 
@@ -350,7 +374,7 @@ def read_plu(filecontent):
     DATE_SIZE = 128
     COMMENT_SIZE = 256
     measdate = filecontent[0:DATE_SIZE].decode('ascii', errors='ignore').replace("\x00", "")
-    print('--plu measdate: ', measdate)
+    print('[INFO] plu measdate: ', measdate)
     i1 = DATE_SIZE + COMMENT_SIZE + 4
     npix = struct.unpack('2I', filecontent[i1:i1 + 8])
     pix_size = struct.unpack('2f', filecontent[i1 + 16:i1 + 24])
@@ -448,7 +472,7 @@ def read_sdf(content):
     if (versionnumber.find('aISO') > -1):
         xpixels, ypixels, dx, dy, zmap2D, measdate = read_asciisdf(content)
     else:
-        print('no implementation for binary sdf existing so far')
+        print('[ERROR] no implementation for binary sdf existing so far')
         xpixels = 0
         ypixels = 0
         dx = 0
@@ -503,7 +527,7 @@ def read_bcrf(content):
             hsize_n = int(headinfo[1])
     # 32 bit floating point
     if (bcrf_str.find('bcr') > -1):
-        print('headersize: ', hsize_n)
+        print('[INFO] headersize: ', hsize_n)
         if (intelmode == 1):
             #           big endian
             if (bcrf_str.find('bcrf') > -1):
@@ -597,13 +621,13 @@ def read_sur(content):
         little_endian = 0
     intsize = int(intsize_char[0]) + int(intsize_char[1])
     if (little_endian == 0):
-        print('big')
+        print('[INFO] big')
         num_data = np.frombuffer(content, dtype=np.uint32, count=3, offset=108)
         dx = np.frombuffer(content, dtype=np.float32, count=1, offset=120)[0]
         dy = np.frombuffer(content, dtype=np.float32, count=1, offset=124)[0]
         dz = np.frombuffer(content, dtype=np.float32, count=1, offset=128)[0]
     else:
-        print('little')
+        print('[INFO] little')
         num_char = np.frombuffer(content, dtype=np.uint8, count=12, offset=108)
         d_char = np.frombuffer(content, dtype=np.uint8, count=12, offset=120)
         num_data = [
@@ -635,7 +659,7 @@ def read_sur(content):
     elif (intsize == 16):
         data_type = np.int16
     else:
-        print('invalid data type', intsize)
+        print('[ERROR] invalid data type', intsize)
     numbyte = int(intsize / 8)
     if (little_endian == 0):
         zmap_array = np.frombuffer(content, dtype=data_type, count=num_data[2], offset=header_size)

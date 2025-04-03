@@ -93,7 +93,6 @@ class ProfileCutter(Cutter, ABC):
             raise Exception('Cut extents are not defined')
 
         xmin, xmax = self.extents
-        print(xmin, xmax)
         i_near = lambda arr, val: (np.abs(arr - val)).argmin()
         start_x, end_x = i_near(obj.X, xmin), i_near(obj.X, xmax)
 
@@ -197,7 +196,7 @@ class ProfileCutter(Cutter, ABC):
         else: raise Exception(f'{startP} is not valid option for startP')
         
         xc = obj.X[split_i]
-        print(f'Cutting @ {xc=}')
+        print(f'[INFO] Cutting @ {xc=}')
         
         x = +(obj.X[split_i:0:-1] - xc)
         z = obj.Z[split_i:0:-1]

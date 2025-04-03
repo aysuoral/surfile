@@ -122,28 +122,28 @@ def options(csvPath=None, save=None, bplt=False, chrono=False):
             figs = [plt.figure(n) for n in fig_nums]
             if save is not None:  # save the figures
                 if len(plt.get_fignums()) > 0:
-                    print(Bcol.OKCYAN + f'Saving images from function {func.__name__}' + Bcol.ENDC)
+                    print(Bcol.OKCYAN + f'[INFO] Saving images from function {func.__name__}' + Bcol.ENDC)
 
                     for i, fig in enumerate(figs):
                         fig.savefig(f'{save}{func.__name__}_{rcs.currentImage}_{str(i)}.png', format='png')
                 else:
-                    # print(Bcol.WARNING + f'Function {func.__name__} has no active figures' + Bcol.ENDC)
+                    # print(Bcol.WARNING + f'[INFO] Function {func.__name__} has no active figures' + Bcol.ENDC)
                     pass
 
             if bplt:  # plot the figure
                 num_figs = plt.get_fignums()
                 if len(num_figs) > 0:
-                    print(Bcol.OKCYAN + f'Plotting image from function {func.__name__}' + Bcol.ENDC)
+                    print(Bcol.OKCYAN + f'[INFO] Plotting image from function {func.__name__}' + Bcol.ENDC)
                     for n in num_figs: plt.figure(n).show()
                 else:
-                    # print(Bcol.WARNING + f'Function {func.__name__} has no active figures' + Bcol.ENDC)
+                    # print(Bcol.WARNING + f'[INFO] Function {func.__name__} has no active figures' + Bcol.ENDC)
                     pass
             else:
                 plt.close('all')
 
             if chrono:  # time the function
                 print(Bcol.OKCYAN +
-                      f"Function {func.__name__} took: {(time.time() - init):.2f} seconds"
+                      f"[INFO] Function {func.__name__} took: {(time.time() - init):.2f} seconds"
                       + Bcol.ENDC)
             return ret
         return inner

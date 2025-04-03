@@ -486,7 +486,7 @@ class ProfileHistogram(FormEstimator):
         # threshold = 50 / tot_bins
 
         line_m = m / 10  # start incline
-        print(f'Hist method -> Start slope  {line_m}')
+        print(f'[INFO] Hist method -> Start slope  {line_m}')
 
         fig = plt.figure()
         ax_h = fig.add_subplot(211)
@@ -529,7 +529,7 @@ class ProfileHistogram(FormEstimator):
                 if n_row >= 15: break  # we got stuck for too long
             else:
                 n_row = 0
-        print(f'Hist method -> End slope {line_m}')
+        print(f'[INFO] Hist method -> End slope {line_m}')
 
 
 class SurfaceLSPlane(FormEstimator):
@@ -759,7 +759,7 @@ class Surface3Points(FormEstimator):
 
                 po.append([a, b, obj.Z[yind, xind]])
 
-            # print(f"Collected points: {po}")
+            # print(f"[INFO] Collected points: {po}")
             a1 = po[1][0] - po[0][0]  # x2 - x1;
             b1 = po[1][1] - po[0][1]  # y2 - y1;
             c1 = po[1][2] - po[0][2]  # z2 - z1;
@@ -860,7 +860,7 @@ class Sphere(FormEstimator):
             sph = np.sqrt(radius**2 - (obj.X-C[0])**2 - (obj.Y-C[1])**2)
             if C[2][0] <= np.nanmean(obj.Z0): concavity = 'convex'
             if C[2] > np.nanmean(obj.Z0): concavity = 'concave'
-            print(f'{concavity=}')
+            print(f'[INFO] {concavity=}')
             obj.Z = obj.Z - sph - C[2] if concavity == 'convex' else obj.Z + sph - C[2]
 
         if bplt:
@@ -1001,7 +1001,7 @@ class Cylinder(FormEstimator):
         p_init = np.array([radius, 0, 0, alphaZ, alphaY])
         est_p, success = optimize.leastsq(errfunc, p_init, args=(X, Y, Z))
 
-        # print(f'Cylinder fit: {est_p}')
+        # print(f'[INFO] Cylinder fit: {est_p}')
 
         z_cyl = _evalCyl(obj, est_p, concavity)
 

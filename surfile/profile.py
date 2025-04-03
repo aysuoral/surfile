@@ -60,16 +60,16 @@ class Profile:
                 word = line.split()[0]
                 if word == 'SPACING':  # linea di spacing x
                     xs = float(line.split()[2])
-                    print(f'Spacing x: {xs}')
+                    print(f'[INFO] Spacing x: {xs}')
                 if word == 'CZ':  # linea di spacing z
                     zs = float(line.split()[4]) * 10 ** 3
-                    print(f'Scaling z: {zs}')
+                    print(f'[INFO] Scaling z: {zs}')
 
                 try:  # salvo solo i valori numerici
                     z.append(float(word) * zs)
                 except ValueError:
                     charlines += 1
-            print(f'Skipped {charlines} word lines')
+            print(f'[INFO] Skipped {charlines} word lines')
             z.pop(0)
 
             self.Z = np.array(z)
@@ -152,19 +152,19 @@ class Profile:
 
         for i, s in enumerate(file_splits):
             name = s[0: 42].decode('utf-8')
-            print(f'{i}, Name = {name.strip()}')
+            print(f'[INFO] {i}, Name = {name.strip()}')
 
         s = file_splits[int(input('Choose graph number: '))]
 
         Lcutoff = np.frombuffer(s[356: 360], dtype=np.single)[0]
         Factor = np.frombuffer(s[360: 364], dtype=np.single)[0]
-        print(f'Lc_o = {Lcutoff}, Factor = {Factor}')
+        print(f'[INFO] Lc_o = {Lcutoff}, Factor = {Factor}')
 
         dt = np.dtype('<i2')
         Ncutoffs = np.frombuffer(s[762: 764], dtype=dt)[0]
         Npoints = np.frombuffer(s[764: 766], dtype=dt)[0]
         Speed = np.frombuffer(s[766: 768], dtype=dt)[0]
-        print(f'N = {Npoints}, Nc_o = {Ncutoffs}, Speed = {Speed}')
+        print(f'[INFO] N = {Npoints}, Nc_o = {Ncutoffs}, Speed = {Speed}')
 
         self.X = np.linspace(0, Ncutoffs * Lcutoff, Npoints)
         self.Z = np.frombuffer(s[920: 920 + 2 * Npoints], dtype=dt) / Factor

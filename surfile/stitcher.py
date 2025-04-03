@@ -44,7 +44,7 @@ def _composeFigure(left, right, T, R=None, support=None, sp=20):
         alpha = R[2, 1]
         left += -beta * support[0] + alpha * support[1]
 
-    print(f'{T=}, {R=}')
+    print(f'[INFO] {T=}, {R=}')
 
     # patches creation
     sp = int(left.shape[1] * (sp / 100))

@@ -60,8 +60,8 @@ def _findHfromHist(hist, edges):
 
         i = i + 1
 
-    print(f'Max left {ml} @ {binl} \nMax right {mh} @ {binh}')
-    print(f'Height: {binh - binl}')
+    print(f'[INFO] Max left {ml} @ {binl} \nMax right {mh} @ {binh}')
+    print(f'[INFO] Height: {binh - binl}')
 
     return binh - binl
 
@@ -160,7 +160,7 @@ class ProfileAnalysis:
                     defined = False
 
             if not defined:
-                print(funct.Bcol.WARNING + 'STEP HEIGHT MIGHT BE INCORRECT (PEAKS ARE POURLY DEFINED)' +
+                print(funct.Bcol.WARNING + '[WARN] step height might be incorrect (peaks are pourly defined)' +
                       funct.Bcol.ENDC)
 
             return st, defined
@@ -235,7 +235,7 @@ class ProfileAnalysis:
         b = bins
         if bins is None:
             b = 2 * stats.iqr(obj.Z) / (obj.Z.size ** (1 / 3))  # Freedman-Diaconis
-            print(f'Using {b} bins in hist')
+            print(f'[INFO] Using {b} bins in hist')
 
         hist, edges = np.histogram(obj.Z, b)
         height = _findHfromHist(hist=hist, edges=edges)
@@ -487,7 +487,7 @@ class SurfaceAnalysis:
         if bins is None:
             # bw = 2 * stats.iqr(obj.Z[np.isfinite(obj.Z)]) / (obj.Z.size ** (1/3))  # Freedman-Diaconis
             b = int(np.sqrt(obj.Z.size))
-            print(f'Using {b} bins in hist')
+            print(f'[INFO] Using {b} bins in hist')
 
         hist, edges = np.histogram(obj.Z[np.isfinite(obj.Z)], bins=b)
         height = _findHfromHist(hist=hist, edges=edges)
@@ -715,7 +715,7 @@ class SurfaceAnalysis:
         if phiCone is not None:  # remove points outside cone from topo
             if phiCone is True:
                 phiCone = findPhiCone()
-                print(f'Using {phiCone=}')
+                print(f'[INFO] Using {phiCone=}')
 
             base = R * np.sin(np.deg2rad(phiCone))
             base = base if -np.pi/2 < est_p[3] < np.pi/2 else -base  # invert polarity for alphaZ >< +-90°

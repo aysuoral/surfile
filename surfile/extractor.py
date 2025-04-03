@@ -172,7 +172,7 @@ class SimpleExtractor(Extractor, ABC):
 
             xind = np.where(obj.X[0, :] <= xdata)[0][-1]
             yind = np.where(obj.Y[:, 0] <= ydata)[0][-1]
-            print(f'Chosen point {xind}, {yind}')  # print the point the user chose
+            print(f'[INFO] Chosen point {xind}, {yind}')  # print the point the user chose
 
             option['x'] = xind
             option['y'] = yind
