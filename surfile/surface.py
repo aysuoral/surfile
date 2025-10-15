@@ -210,7 +210,7 @@ class Surface:
         name = os.path.join(fname, self.name + '.txt') if os.path.isdir(fname) else os.path.splitext(fname)[0] + '.txt'
         np.savetxt(name, np.c_[self.X.ravel().T, self.Y.ravel().T, self.Z.ravel().T], fmt='%.4e')
 
-    def rotate(self, angle):
+    def rotate(self, angle, original=False):
         """
         Rotates the original topography by the specified angle
 
@@ -224,7 +224,10 @@ class Surface:
         <span style="color:orange">This function will be moved to a utility module in the future
         use with caution !!!</span>.
         """
-        self.Z = ndimage.rotate(self.Z0, angle, order=0, reshape=False, cval=np.nan)
+        if original:
+            self.Z0 = ndimage.rotate(self.Z0, angle, order=0, reshape=False, cval=np.nan)
+        else:
+            self.Z = ndimage.rotate(self.Z0, angle, order=0, reshape=False, cval=np.nan)
 
     def resample(self, newXsize, newYsize):
         """

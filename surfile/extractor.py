@@ -191,6 +191,12 @@ class SimpleExtractor(Extractor, ABC):
         return prf, option
 
     @staticmethod
+    def centerProfile(obj: surface.Surface):
+        prf = profile.Profile()
+        prf.setValues(obj.x, obj.Z0[obj.Y.shape[1] // 2, :], bplt=False)
+        return prf
+
+    @staticmethod
     def meanProfile(obj: surface.Surface, direction='x', cutter=None, bplt=False):
         """
         Extracts the mean profile along x or y
