@@ -271,7 +271,7 @@ class SurfaceCutter(Cutter, ABC):
         return x_cut, y_cut, z_cut
 
     @staticmethod
-    def cut(obj: surface.Surface, finalize=True):
+    def cut(obj: surface.Surface, finalize='cut'):
         """
         Cuts the surface with a rectangle drawn by the user
 
@@ -279,9 +279,11 @@ class SurfaceCutter(Cutter, ABC):
         ----------
         obj : surface.Surface
             The surface object on wich the cut is applied
-        finalize: bool
-            If set to False the cut will not alter the profile,
-            the method will only return the extents chosen by the user
+        finalize: str
+            If 'cut' the cut is applied to the surface object
+            If 'mask' the cut area is masked with avg values
+            If 'inv_mask' the area outside the cut is masked with avg values
+            If 'false' the cut will not alter the surface,
 
         Returns
         ----------
@@ -304,13 +306,23 @@ class SurfaceCutter(Cutter, ABC):
             y_cut = obj.Y[start_y: end_y, start_x: end_x]
             z_cut = obj.Z[start_y: end_y, start_x: end_x]
 
-            if finalize:
+            if finalize == 'cut':
                 obj.X = x_cut
                 obj.Y = y_cut
                 obj.Z = z_cut
 
                 obj.x = obj.x[start_x: end_x]
                 obj.y = obj.y[start_y: end_y]
+                
+            elif finalize == 'mask':
+                avg_val = np.nanmean(obj.Z)
+                obj.Z[start_y: end_y, start_x: end_x] = avg_val
+                
+            elif finalize == 'inv_mask':
+                avg_val = np.nanmean(obj.Z)
+                mask = np.ones_like(obj.Z, dtype=bool)
+                mask[start_y: end_y, start_x: end_x] = False
+                obj.Z[mask] = avg_val
 
             cuts.append(x_cut)
             cuts.append(y_cut)

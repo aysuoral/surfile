@@ -193,7 +193,8 @@ class Profile:
         """ 
         self.name = os.path.basename(fname)
         
-        self.X, self.Z = np.genfromtxt(fname, 
+        self.X, self.Z = np.genfromtxt(fname,
+                                       delimiter=',',
                                        skip_header=header, 
                                        usecols=[0, 1], unpack=True,
                                        converters={0: lambda s: float(s or np.nan)})
@@ -248,7 +249,7 @@ class Profile:
         funct.persFig(
             [ax],
             gridcol='grey',
-            xlab='x [mm]',
+            xlab='x [um]',
             ylab='z [um]'
         )
         ax.set_title(self.name)
