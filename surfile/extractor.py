@@ -193,7 +193,7 @@ class SimpleExtractor(Extractor, ABC):
     @staticmethod
     def centerProfile(obj: surface.Surface):
         prf = profile.Profile()
-        prf.setValues(obj.x, obj.Z0[obj.Y.shape[1] // 2, :], bplt=False)
+        prf.setValues(obj.x, obj.Z[obj.Y.shape[1] // 2, :], bplt=False)
         return prf
 
     @staticmethod

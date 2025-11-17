@@ -225,9 +225,9 @@ class Surface:
         use with caution !!!</span>.
         """
         if original:
-            self.Z0 = ndimage.rotate(self.Z0, angle, order=0, reshape=False, cval=np.nan)
-        else:
             self.Z = ndimage.rotate(self.Z0, angle, order=0, reshape=False, cval=np.nan)
+        else:
+            self.Z = ndimage.rotate(self.Z, angle, order=0, reshape=False, cval=np.nan)
 
     def resample(self, newXsize, newYsize):
         """
