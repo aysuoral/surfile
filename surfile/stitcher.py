@@ -21,6 +21,55 @@ from skopt.plots import plot_convergence
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree
 
+class TransformParams:
+    rx: float
+    ry: float
+    rz: float
+    tx: float
+    ty: float
+    tz: float
+    
+    def __init__(self):
+        pass
+    
+    @classmethod
+    def from_numbers(cls, tx=0, ty=0, tz=0, rx=0, ry=0, rz=0):
+        instance = cls()
+        instance.rx, instance.ry, instance.rz, instance.tx, instance.ty, instance.tz = rx, ry, rz, tx, ty, tz
+        return instance
+        
+    @classmethod
+    def from_list(cls, params: list[float]):
+        # params order: x y z rx ry rz
+        instance = cls()
+        instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = params
+        return instance
+    
+    @classmethod
+    def from_tuples(cls, rot: R, trasl: np.ndarray):
+        instance = cls()
+        eul = rot.as_euler('xyz')
+        instance.rx, instance.ry, instance.rz = eul[0], eul[1], eul[2]
+        instance.tx, instance.ty, instance.tz = trasl[0], trasl[1], trasl[2]
+        return instance
+    
+    def get_params(self):
+        return [self.rx, self.ry, self.rz, self.tx, self.ty, self.tz]
+    
+    def get_matrix(self):
+        Rmat = R.from_euler('xyz', np.radians([self.rx, self.ry, self.rz])).as_matrix()
+        T = np.eye(4)
+        T[:3, :3] = Rmat
+        T[:3, 3] = [self.tx, self.ty, self.tz]
+        return T
+    
+    def rescale(self, factor):
+        self.tx *= factor
+        self.ty *= factor
+        self.tz *= factor
+    
+    def __str__(self):
+        return f"TransformParams: {self.get_matrix()}"
 
 def _composeFigure(left, right, T, R=None, support=None, sp=20):
     """
@@ -123,12 +172,20 @@ def isolate_common_points(fixed_points_pc, moving_points_pc, stitchprc):
     # show_point_cloud([make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset), fixed_points_pc, moving_points_pc], defined_colors=True)
     return make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset)
 
-def apply_transform(params, points):
-    rx, ry, rz, tx, ty, tz = params
-    Rmat = R.from_euler('xyz', np.radians([rx, ry, rz])).as_matrix()
-    T = np.eye(4)
-    T[:3, :3] = Rmat
-    T[:3, 3] = [tx, ty, tz]
+def apply_transform(params: TransformParams, points, params0: TransformParams=None):
+    """
+    Applies a transformation on the points, if params0 is provided
+    performs the transformation relative to the 0 transformation
+    """
+    T = params.get_matrix()
+    
+    if params0 is not None:
+        # perform a relative transform
+        T0 = params0.get_matrix()
+        T0_inv = np.linalg.inv(T0)
+        
+        T = T0_inv @ T
+        
     pts_h = np.hstack([points, np.ones((points.shape[0], 1))])
     return (T @ pts_h.T).T[:, :3]
 
@@ -411,61 +468,41 @@ class SurfaceStitcher:
         robotTfile : str
             The path of the file containing the robot positions and rotations
         """
-        def read_robot_positions_rotations(robot_file, angles_in_degrees=True):
-            positions, rotations = [], []
-            with open(robot_file, "r") as f:
-                f.readline()
-                for line in f:
-                    line = line[3:].strip().replace(',', ' ')
-                    try:
-                        values = list(map(float, line.split()))
-                        if len(values) != 6:
-                            continue
-                        x, y, z, rx, ry, rz = values
-                        positions.append(np.array([x, y, z]) * 1000)  # convert to um
-                        rotations.append(R.from_euler('xyz', [rx, ry, rz], degrees=angles_in_degrees))
-                        
-                        if len(positions) == len(surfaces):
-                            break
-                    except ValueError:
+        def read_robot_positions_rotations(file_robot):
+            tras: TransformParams = []
+            with open(file_robot, "r") as f:
+                f.readline() # skip first line
+                for riga in f:
+                    riga = riga[3:].strip().replace(',', ' ')
+                    
+                    valori = list(map(float, riga.split()))
+                    tr = TransformParams.from_list(valori)
+                    tr.rescale(1000)  # convert to um
+                    if len(valori) != 6:
                         continue
-            return positions, rotations
+                    tras.append(tr)
+            return tras
         
         point_clouds = []
         for surf in surfaces:
             pc = make_o3d_cloud(surf, remove_outliers=True)
             point_clouds.append(pc)
-            # show_point_cloud(pc, name="Individual Surface Point Cloud")
             
-        robot_trans, robot_rot = read_robot_positions_rotations(robotTfile)
-        
-        print(f"[INFO ROB]")
-        for i in range(len(point_clouds)):
-            print(f" Surface {i}: Robot Pos {robot_trans[i]}, Rot {robot_rot[i].as_euler('xyz', degrees=True)}")
-
-        # Trasforma tutte le nuvole nel frame della prima scansione
-        T1 = np.eye(4)
-        T1[:3,:3] = robot_rot[0].as_matrix()
-        T1[:3,3] = robot_trans[0]
-        T1_inv = np.linalg.inv(T1)
+        robot_trans = read_robot_positions_rotations(robotTfile)
+        print(f"[INFO ROBOT STITCH] Loaded {len(robot_trans)} robot transformations for {len(point_clouds)} surfaces")
         
         point_clouds_T = []
         fixed_ref = point_clouds[0].points
-        for pc, rot, trasl in zip(point_clouds, robot_rot, robot_trans):
+        for pc, trasf in zip(point_clouds, robot_trans):
             pts = np.asarray(pc.points)
-            Ti = np.eye(4)
-            Ti[:3,:3] = rot.as_matrix()
-            Ti[:3,3] = trasl
-            T_rel = T1_inv @ Ti
-            pts_h = np.hstack([pts, np.ones((pts.shape[0],1))])
-            pts_T = (T_rel @ pts_h.T).T[:,:3]
+            pts_T = apply_transform(trasf, pts, params0=robot_trans[0])
             point_clouds_T.append(make_o3d_cloud(pts_T))
-            
             fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
         
         fixed_ref_pc = make_o3d_cloud(fixed_ref)
-        if bplt: show_point_cloud([fixed_ref_pc], 
-                                  name="Stitched Point Cloud from Robot Poses", defined_colors=False)
+        if bplt: 
+            show_point_cloud([fixed_ref_pc], name="Stitched Point Cloud from Robot Poses", defined_colors=False)
+            show_point_cloud(point_clouds_T, name="Stitched Point Cloud from Robot Poses", defined_colors=True)
         
         return fixed_ref_pc, point_clouds_T
         
