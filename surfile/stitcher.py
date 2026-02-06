@@ -8,13 +8,18 @@ import copy
 
 from matplotlib import patches, cm
 
-from surfile import surface, funct
+from surfile import surface, funct, cutter
 from scipy import optimize, signal, ndimage
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 import open3d as o3d
+from skopt import gp_minimize
+from skopt.space import Real
+from skopt.plots import plot_convergence
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial import cKDTree
 
 
 def _composeFigure(left, right, T, R=None, support=None, sp=20):
@@ -39,135 +44,95 @@ def _composeFigure(left, right, T, R=None, support=None, sp=20):
     composed : np.array
         The composed array
     """
+    lcopy = copy.deepcopy(left)
+    rcopy = copy.deepcopy(right)
+    
     if R is not None and support is not None:  # add rotation displacement
         beta = R[0, 2]
         alpha = R[2, 1]
-        left += -beta * support[0] + alpha * support[1]
+        lcopy += -beta * support[0] + alpha * support[1]
 
     print(f'[INFO] {T=}, {R=}')
 
     # patches creation
-    sp = int(left.shape[1] * (sp / 100))
-    left = np.roll(left, shift=(T[0], T[1]), axis=(1, 0))  # add x, y displacements
+    sp = int(lcopy.shape[1] * (sp / 100))
+    lcopy = np.roll(lcopy, shift=(T[0], T[1]), axis=(1, 0))  # add x, y displacements
 
-    left = left[:, :-sp // 2]
-    right = right[:, sp // 2:]
+    lcopy = lcopy[:, :-sp // 2]
+    rcopy = rcopy[:, sp // 2:]
 
-    if T[2] == 'best': left -= np.mean(left[:, -1]) - np.mean(right[:, 0])
+    if T[2] == 'best': lcopy -= np.mean(lcopy[:, -1]) - np.mean(rcopy[:, 0])
 
-    st = np.hstack((left, right))
+    st = np.hstack((lcopy, rcopy))
 
     fig, (ax, bx) = plt.subplots(nrows=2, ncols=1)
-    ax.imshow(left[:, -sp:])
-    bx.imshow(right[:, :sp])
+    ax.imshow(lcopy[:, -sp:])
+    bx.imshow(rcopy[:, :sp])
 
     fig2, cx = plt.subplots(nrows=1, ncols=1)
     cx.imshow(st, cmap=cm.viridis)
     plt.show()
 
+def make_o3d_cloud(surf: surface.Surface | np.ndarray, color=None, remove_outliers=False) -> o3d.geometry.PointCloud:
+    points = surf.getPoints(exclude_nan=True) if isinstance(surf, surface.Surface) else surf
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(points)
+    if color is not None:
+        pc.paint_uniform_color(color)
+        
+    if remove_outliers:
+        pc, _ = pc.remove_statistical_outlier(nb_neighbors=40, std_ratio=3.0)
+    return pc
+
+def merge_and_downsample_point_cloud(points1, points2, voxel_size=0.001):
+    combined = np.vstack([points1, points2])
+    pc = make_o3d_cloud(combined)
+    pc_down = pc.voxel_down_sample(voxel_size=voxel_size)
+    return np.asarray(pc_down.points)
+
+def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], defined_colors=False, name="Point Cloud"):
+    if defined_colors:
+        colors = [np.array([139, 0, 0]) / 255, np.array([139, 139, 0]) / 255, np.array([0, 0, 139]) / 255, np.array([0, 139, 0]) / 255, np.array([139, 0, 139]) / 255, np.array([0, 139, 139]) / 255]
+        for pc, color in zip(point_clouds, colors):
+            pc.paint_uniform_color(color)
+    
+    o3d.visualization.draw_geometries(point_clouds)
+
+def isolate_common_points(fixed_points_pc, moving_points_pc, stitchprc):
+    fixed_points = np.asarray(fixed_points_pc.points)
+    moving_points = np.asarray(moving_points_pc.points)
+    
+    fixed_center = np.mean(fixed_points, axis=0)
+    moving_center = np.mean(moving_points, axis=0)
+
+    # direzione movimento
+    moving_dir = moving_center - fixed_center
+    norm = np.linalg.norm(moving_dir)
+    if norm == 0:
+        moving_dir = np.array([1.0, 0.0, 0.0])
+    else:
+        moving_dir /= norm
+
+    # filtra punti entro stitchprc
+    dist_fixed = (fixed_points - fixed_center) @ moving_dir
+    fixed_subset = fixed_points[dist_fixed <= norm * stitchprc / 100]
+    
+    dist_moving = (moving_points - moving_center) @ moving_dir
+    moving_subset = moving_points[norm * stitchprc / 100 <= -dist_moving]
+    
+    # show_point_cloud([make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset), fixed_points_pc, moving_points_pc], defined_colors=True)
+    return make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset)
+
+def apply_transform(params, points):
+    rx, ry, rz, tx, ty, tz = params
+    Rmat = R.from_euler('xyz', np.radians([rx, ry, rz])).as_matrix()
+    T = np.eye(4)
+    T[:3, :3] = Rmat
+    T[:3, 3] = [tx, ty, tz]
+    pts_h = np.hstack([points, np.ones((points.shape[0], 1))])
+    return (T @ pts_h.T).T[:, :3]
 
 class SurfaceStitcher:
-    @staticmethod
-    def stitchMinimizeNorm(surl, surr, stitchPrc=20, pixelScan=40, bplt=False):
-        """
-        Given 2 surfaces finds the best allignement
-        by minimizing the norm2 of the difference
-
-        Parameters
-        ----------
-        surl : surface.Surface
-            The left image to be stitched
-        surr : surface.Surface
-            The right image to be stitched
-        stitchPrc : int
-            the percentage of the image overlapping
-        pixelScan: int
-            the number of pixel the method tryes to displace the images
-            an higher number results in longer excution time
-        bplt : bool
-            If true plots the stitching process, limits the radius scan to 5 pixels
-            Use this only to see graphically and very slowly what this function does.
-
-        Returns
-        -------
-        surface.Surface
-            The stitched image
-        """
-        # Given starting displacement (0, 0) in x and y
-        # move surr % of stitching.py over the other % surl
-        # and minimize surr(x - a; y - b) - surl(x, y)
-
-        # We need a function that given a, b moves surr
-        # and subtracts surr moved from surl
-
-        # find the interested zones to be stitched
-        lZone = surl.Z[:, 1 + int(surl.Z.shape[1] * (1 - stitchPrc / 100)):]
-        rZone = surl.Z[:, :int(surl.Z.shape[1] * (stitchPrc / 100))]
-        # rZone = np.roll(lZone, 30, axis=1)  # used for testing
-
-        ny, nx = lZone.shape
-
-        if bplt:
-            fig, (ax, bx, cx) = plt.subplots(nrows=1, ncols=3)
-            plot_data = ax.imshow(lZone)
-            bx.imshow(lZone)
-            cx.imshow(rZone)
-            rectb = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor='r', facecolor='none')
-            rectc = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor='r', facecolor='none')
-            bx.add_patch(rectb)
-            cx.add_patch(rectc)
-
-            funct.persFig([ax, bx, cx], xlab='x [pixels]', ylab='y [pixels]')
-
-            plt.show(block=False)
-
-        def move(disp):
-            a, b = disp[0], disp[1]
-            print(a, b)
-            if a >= 0:
-                laa, raa, lab, rab = a, nx, 0, nx - a
-            else:
-                a = -a
-                laa, raa, lab, rab = 0, nx - a, a, nx
-
-            if b >= 0:
-                lba, rba, lbb, rbb = b, ny, 0, ny - b
-            else:
-                b = -b
-                lba, rba, lbb, rbb = 0, ny - b, b, ny
-
-            alpha_patch = lZone[lba: rba, laa: raa]
-            beta_patch = rZone[lbb: rbb, lab: rab]
-
-            diff = alpha_patch - beta_patch
-
-            if bplt:
-                plot_data.set_data(diff)
-
-                rectb.set_xy((laa, lba))
-                rectb.set_width(raa - laa)
-                rectb.set_height(rba - lba)
-                bx.add_patch(rectb)
-                rectc.set_xy((lab, lbb))
-                rectc.set_width(rab - lab)
-                rectc.set_height(rbb - lbb)
-
-                fig.canvas.draw()
-                plt.pause(0.05)
-
-            return np.linalg.norm(diff)  # maybe an ssd (sum of square difference with a gaussian kernel is better)
-
-        # a and b are ints since they rapresent pixel translations
-        nPixelMaxDisp = pixelScan if not bplt else 20
-        bestTranslation = optimize.brute(
-            move,
-            ranges=((slice(-nPixelMaxDisp, nPixelMaxDisp, 1),) * 2),
-            disp=True,
-            finish=None
-        )
-
-        print(bestTranslation)
-
     @staticmethod
     def stitchCorrelation(surl, surr, stitchPrc=20, samplingPrc=50, correlateDer=True, bplt=False):
         """
@@ -191,10 +156,16 @@ class SurfaceStitcher:
         bplt : bool
             If true plots the stitched image
         """
+        if surl.Z.shape != surr.Z.shape:
+            raise ValueError("[ERROR COR] surl and surr must have the same shape for FGR stitching")
+
+        len = int(surl.Z.shape[1] * stitchPrc / 100)
+        
         # find the interested zones to be stitched
-        # TODO: what if the lZone and rZone have different sizes ?? (often they dont)
-        lZone = surl.Z[:, 1 + int(surl.Z.shape[1] * (1 - stitchPrc / 100)):]
-        rZone = surr.Z[:, :int(surr.Z.shape[1] * (stitchPrc / 100))]
+        lZone = copy.deepcopy(surl.Z[:, -len:])
+        rZone = copy.deepcopy(surr.Z[:, :len])
+        
+        print(f'[INFO COR] {lZone.shape=}, {rZone.shape=}')
 
         if correlateDer:
             lZone = np.diff(lZone)
@@ -202,30 +173,30 @@ class SurfaceStitcher:
 
         # take a central patch from the second image
         center_x, center_y = lZone.shape[0] // 2, lZone.shape[1] // 2
-        size_x, size_y = lZone.shape[0] * samplingPrc // 200, lZone.shape[1] * samplingPrc // 200
+        size_x, size_y = lZone.shape[0] * samplingPrc // 100, lZone.shape[1] * samplingPrc // 100
         sampleL = lZone[center_x - size_x // 2: center_x + size_x // 2,
                   center_y - size_y // 2: center_y + size_y // 2]
         sampleR = rZone[center_x - size_x // 2: center_x + size_x // 2,
                   center_y - size_y // 2: center_y + size_y // 2]
+        
 
         # correlate the patch with the first image to find its position
         nrmze = lambda a: a / np.linalg.norm(a)
-        ccL = signal.correlate2d(nrmze(lZone), nrmze(sampleR), mode='valid')
-        ccR = signal.correlate2d(nrmze(rZone), nrmze(sampleL), mode='valid')
+        ccL = signal.correlate2d(lZone, sampleR, mode='valid')
+        ccR = signal.correlate2d(rZone, sampleL, mode='valid')
 
         ML = np.argmax(ccL)
         yML, xML = np.unravel_index(ML, ccL.shape)
-        print(f'{ML=} {xML=} {yML=}')
+        print(f'[INFO COR] {ML=} {xML=} {yML=}')
 
         MR = np.argmax(ccR)
         yMR, xMR = np.unravel_index(MR, ccR.shape)
-        print(f'{MR=} {xMR=} {yMR=}')
-
+        print(f'[INFO COR] {MR=} {xMR=} {yMR=}')
         bestLTranslation = [ccL.shape[1] // 2 - xML, ccL.shape[0] // 2 - yML]
         bestRTranslation = [ccR.shape[1] // 2 - xMR, ccR.shape[0] // 2 - yMR]
 
         meanTranslation = [(bestLTranslation[i] - bestRTranslation[i]) // 2 for i in [0, 1]]
-        print(f'{bestLTranslation=}\n{bestRTranslation=}\n{meanTranslation=}')
+        print(f'[INFO COR] {bestLTranslation=}\n{bestRTranslation=}\n{meanTranslation=}')
 
         flippedccR = np.flip(ccR)
         cross_cc = ccL * flippedccR
@@ -238,12 +209,14 @@ class SurfaceStitcher:
         if bplt:
             fig, ((ax, bx, cx), (dx, ex, fx)) = plt.subplots(nrows=2, ncols=3)
             ax.imshow(ccL)
+            ax.set_title('ccL')
             ax.plot(xML, yML, 'ro', ms=5)
             bx.imshow(lZone)
             cx.imshow(sampleR)
 
             dx.imshow(ccR)
-            dx.plot(xMR, yML, 'ro', ms=5)
+            dx.set_title('ccR')
+            dx.plot(xMR, yMR, 'ro', ms=5)
             ex.imshow(rZone)
             fx.imshow(sampleL)
             funct.persFig([ax, bx, cx, dx, ex, fx], xlab='x [pixels]', ylab='y [pixels]', gridcol='none')
@@ -286,14 +259,21 @@ class SurfaceStitcher:
         stitchPrc : int
             the percentage of the image overlapping
         """
-        # find the interested zones to be stitched
-        lZone = copy.deepcopy(surl.Z[:, 1 + int(surl.Z.shape[1] * (1 - stitchPrc / 100)):])
-        rZone = copy.deepcopy(surr.Z[:, :int(surr.Z.shape[1] * (stitchPrc / 100))])
+        if surl.Z.shape != surr.Z.shape:
+            raise ValueError("[ERROR FGR] surl and surr must have the same shape for FGR stitching")
 
-        # scale parameter for noramalization
+        len = int(surl.Z.shape[1] * stitchPrc / 100)
+        
+        # find the interested zones to be stitched
+        lZone = copy.deepcopy(surl.Z[:, -len:])
+        rZone = copy.deepcopy(surr.Z[:, :len])
+        
+        print(f'[INFO FGR] {lZone.shape=}, {rZone.shape=}')
+
+        # scale parameter for normalization
         scale = 1
 
-        scalez = np.max((lZone, rZone)) * 2 * scale  # re-range [-scale * 0.5, scale * 0.5]
+        scalez = np.max([lZone.max(), rZone.max()]) * 2 * scale  # re-range [-scale * 0.5, scale * 0.5]
         lZone /= scalez
         rZone /= scalez
 
@@ -326,28 +306,29 @@ class SurfaceStitcher:
 
         pcd_l = toPC(lZone)
         pcd_r = toPC(rZone)
-
-        o3d.visualization.draw_geometries([pcd_l])
-        o3d.visualization.draw_geometries([pcd_r])
+        
+        print(pcd_l)
+        
+        # exit()
 
         def draw_registration_result(source, target, transformation):
             source_temp = copy.deepcopy(source)
             target_temp = copy.deepcopy(target)
-            source_temp.paint_uniform_color(np.array([139, 242, 80]) / 255)
-            target_temp.paint_uniform_color(np.array([209, 91, 245]) / 255)
+            source_temp.paint_uniform_color(np.array([139, 0, 0]) / 255)
+            target_temp.paint_uniform_color(np.array([0, 0, 139]) / 255)
             source_temp.transform(transformation)
             o3d.visualization.draw_geometries([source_temp, target_temp])
 
         def preprocess_point_cloud(pcd, voxel_size):
-            print(":: Downsample with a voxel size %.3f." % voxel_size)
+            print("[INFO FGR] Downsample with a voxel size %.3f." % voxel_size)
             pcd_down = pcd.voxel_down_sample(voxel_size)
 
             radius_normal = voxel_size * 2
-            print(":: Estimate normal with search radius %.3f." % radius_normal)
+            print("[INFO FGR] Estimate normal with search radius %.3f." % radius_normal)
             pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
 
             radius_feature = voxel_size * 5
-            print(":: Compute FPFH feature with search radius %.3f." % radius_feature)
+            print("[INFO FGR] Compute FPFH feature with search radius %.3f." % radius_feature)
             pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
                 pcd_down,
                 o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
@@ -360,14 +341,18 @@ class SurfaceStitcher:
 
             source_down, source_fpfh = preprocess_point_cloud(source, voxel_size)
             target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
+            
+            # o3d.visualization.draw_geometries([source_down])
+            # o3d.visualization.draw_geometries([target_down])
+            
             return source, target, source_down, target_down, source_fpfh, target_fpfh
 
         def execute_global_registration(source_down, target_down, source_fpfh,
                                         target_fpfh, voxel_size):
-            distance_threshold = voxel_size * 1.5
-            print(":: FGR registration on downsampled point clouds.")
-            print(":: downsampling voxel size is %.3f," % voxel_size)
-            print(":: distance threshold %.3f." % distance_threshold)
+            distance_threshold = voxel_size * 0.5
+            print("[INFO FGR] FGR registration on downsampled point clouds.")
+            print("[INFO FGR] downsampling voxel size is %.3f," % voxel_size)
+            print("[INFO FGR] distance threshold %.3f." % distance_threshold)
             result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
                 source_down, target_down, source_fpfh, target_fpfh,
                 o3d.pipelines.registration.FastGlobalRegistrationOption(
@@ -382,19 +367,19 @@ class SurfaceStitcher:
                                                  source_fpfh, target_fpfh,
                                                  voxel_size)
         print(result_fgr)
-        print("Transformation is:")
+        print("[INFO FGR] Transformation is:")
         print(result_fgr.transformation)
         draw_registration_result(source_down, target_down, result_fgr.transformation)
 
-        print("Refine with point-to-point ICP")
+        print("[INFO FGR] Refine with point-to-point ICP")
         # actually FGR should not need this step
-        distance_threshold = 0.005 * scale
+        distance_threshold = 0.001 * scale
         reg_p2p = o3d.pipelines.registration.registration_icp(
             source, target, distance_threshold,
             init=result_fgr.transformation,
             estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(True))
         print(reg_p2p)
-        print("Transformation is:")
+        print("[INFO FGR] Transformation is:")
         print(reg_p2p.transformation)
         draw_registration_result(source, target, reg_p2p.transformation)
 
@@ -413,6 +398,83 @@ class SurfaceStitcher:
                        # support=(surl.X, surl.Y),
                        sp=stitchPrc)
 
+    @staticmethod
+    def stitchRobot(surfaces: list[surface.Surface], robotTfile, bplt=False):
+        """
+        Finds the best allignment between surl and surr
+        by using the robot positions and rotations recorded in robotTfile
+
+        Parameters
+        ----------
+        surfaces : list[surface.Surface]
+            The list of surfaces to be stitched, in the order they were acquired
+        robotTfile : str
+            The path of the file containing the robot positions and rotations
+        """
+        def read_robot_positions_rotations(robot_file, angles_in_degrees=True):
+            positions, rotations = [], []
+            with open(robot_file, "r") as f:
+                f.readline()
+                for line in f:
+                    line = line[3:].strip().replace(',', ' ')
+                    try:
+                        values = list(map(float, line.split()))
+                        if len(values) != 6:
+                            continue
+                        x, y, z, rx, ry, rz = values
+                        positions.append(np.array([x, y, z]) * 1000)  # convert to um
+                        rotations.append(R.from_euler('xyz', [rx, ry, rz], degrees=angles_in_degrees))
+                        
+                        if len(positions) == len(surfaces):
+                            break
+                    except ValueError:
+                        continue
+            return positions, rotations
+        
+        point_clouds = []
+        for surf in surfaces:
+            pc = make_o3d_cloud(surf, remove_outliers=True)
+            point_clouds.append(pc)
+            # show_point_cloud(pc, name="Individual Surface Point Cloud")
+            
+        robot_trans, robot_rot = read_robot_positions_rotations(robotTfile)
+        
+        print(f"[INFO ROB]")
+        for i in range(len(point_clouds)):
+            print(f" Surface {i}: Robot Pos {robot_trans[i]}, Rot {robot_rot[i].as_euler('xyz', degrees=True)}")
+
+        # Trasforma tutte le nuvole nel frame della prima scansione
+        T1 = np.eye(4)
+        T1[:3,:3] = robot_rot[0].as_matrix()
+        T1[:3,3] = robot_trans[0]
+        T1_inv = np.linalg.inv(T1)
+        
+        point_clouds_T = []
+        fixed_ref = point_clouds[0].points
+        for pc, rot, trasl in zip(point_clouds, robot_rot, robot_trans):
+            pts = np.asarray(pc.points)
+            Ti = np.eye(4)
+            Ti[:3,:3] = rot.as_matrix()
+            Ti[:3,3] = trasl
+            T_rel = T1_inv @ Ti
+            pts_h = np.hstack([pts, np.ones((pts.shape[0],1))])
+            pts_T = (T_rel @ pts_h.T).T[:,:3]
+            point_clouds_T.append(make_o3d_cloud(pts_T))
+            
+            fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
+        
+        fixed_ref_pc = make_o3d_cloud(fixed_ref)
+        if bplt: show_point_cloud([fixed_ref_pc], 
+                                  name="Stitched Point Cloud from Robot Poses", defined_colors=False)
+        
+        return fixed_ref_pc, point_clouds_T
+        
+        
+        
+        
+        
+        
+        
     # @staticmethod
     # def stitchSSDminimize(surl, surr, stitchPrc=20, bplt=False):
     #     """
@@ -472,3 +534,104 @@ class SurfaceStitcher:
     #
     #     print(match_list)
     #     return np.array(match_list)
+    
+    # @staticmethod
+    # def stitchMinimizeNorm(surl, surr, stitchPrc=20, pixelScan=40, bplt=False):
+    #     """
+    #     Given 2 surfaces finds the best allignement
+    #     by minimizing the norm2 of the difference
+
+    #     Parameters
+    #     ----------
+    #     surl : surface.Surface
+    #         The left image to be stitched
+    #     surr : surface.Surface
+    #         The right image to be stitched
+    #     stitchPrc : int
+    #         the percentage of the image overlapping
+    #     pixelScan: int
+    #         the number of pixel the method tryes to displace the images
+    #         an higher number results in longer excution time
+    #     bplt : bool
+    #         If true plots the stitching process, limits the radius scan to 5 pixels
+    #         Use this only to see graphically and very slowly what this function does.
+
+    #     Returns
+    #     -------
+    #     surface.Surface
+    #         The stitched image
+    #     """
+    #     # Given starting displacement (0, 0) in x and y
+    #     # move surr % of stitching.py over the other % surl
+    #     # and minimize surr(x - a; y - b) - surl(x, y)
+
+    #     # We need a function that given a, b moves surr
+    #     # and subtracts surr moved from surl
+
+    #     # find the interested zones to be stitched
+    #     lZone = surl.Z[:, 1 + int(surl.Z.shape[1] * (1 - stitchPrc / 100)):]
+    #     rZone = surl.Z[:, :int(surl.Z.shape[1] * (stitchPrc / 100))]
+    #     # rZone = np.roll(lZone, 30, axis=1)  # used for testing
+
+    #     ny, nx = lZone.shape
+
+    #     if bplt:
+    #         fig, (ax, bx, cx) = plt.subplots(nrows=1, ncols=3)
+    #         plot_data = ax.imshow(lZone)
+    #         bx.imshow(lZone)
+    #         cx.imshow(rZone)
+    #         rectb = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor='r', facecolor='none')
+    #         rectc = patches.Rectangle((0, 0), 0, 0, linewidth=2, edgecolor='r', facecolor='none')
+    #         bx.add_patch(rectb)
+    #         cx.add_patch(rectc)
+
+    #         funct.persFig([ax, bx, cx], xlab='x [pixels]', ylab='y [pixels]')
+
+    #         plt.show(block=False)
+
+    #     def move(disp):
+    #         a, b = disp[0], disp[1]
+    #         print(a, b)
+    #         if a >= 0:
+    #             laa, raa, lab, rab = a, nx, 0, nx - a
+    #         else:
+    #             a = -a
+    #             laa, raa, lab, rab = 0, nx - a, a, nx
+
+    #         if b >= 0:
+    #             lba, rba, lbb, rbb = b, ny, 0, ny - b
+    #         else:
+    #             b = -b
+    #             lba, rba, lbb, rbb = 0, ny - b, b, ny
+
+    #         alpha_patch = lZone[lba: rba, laa: raa]
+    #         beta_patch = rZone[lbb: rbb, lab: rab]
+
+    #         diff = alpha_patch - beta_patch
+
+    #         if bplt:
+    #             plot_data.set_data(diff)
+
+    #             rectb.set_xy((laa, lba))
+    #             rectb.set_width(raa - laa)
+    #             rectb.set_height(rba - lba)
+    #             bx.add_patch(rectb)
+    #             rectc.set_xy((lab, lbb))
+    #             rectc.set_width(rab - lab)
+    #             rectc.set_height(rbb - lbb)
+
+    #             fig.canvas.draw()
+    #             plt.pause(0.05)
+
+    #         return np.linalg.norm(diff)  # maybe an ssd (sum of square difference with a gaussian kernel is better)
+
+    #     # a and b are ints since they rapresent pixel translations
+    #     nPixelMaxDisp = pixelScan if not bplt else 20
+    #     bestTranslation = optimize.brute(
+    #         move,
+    #         ranges=((slice(-nPixelMaxDisp, nPixelMaxDisp, 1),) * 2),
+    #         disp=True,
+    #         finish=None
+    #     )
+
+    #     print(bestTranslation)

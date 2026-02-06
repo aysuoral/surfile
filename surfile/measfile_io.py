@@ -207,7 +207,7 @@ def detect_csv_separator(file_path):
     else:
         raise Exception("[ERROR] Could not find separator type")
 
-def read_xyztxt(fname):
+def read_xyztxt(fname, userscalecorr=[1.0,1.0,1.0]):
     """
     Reads a txt file with three columns [x, y, z]
 
@@ -226,9 +226,9 @@ def read_xyztxt(fname):
     # find size of array
     i = np.argwhere(Y > 0)[0][0]
 
-    X = np.reshape(X, (X.size // i, i))
-    Y = np.reshape(Y, (Y.size // i, i))
-    Z = np.reshape(Z, (Z.size // i, i))
+    X = np.reshape(X, (X.size // i, i)) * userscalecorr[0]
+    Y = np.reshape(Y, (Y.size // i, i)) * userscalecorr[1]
+    Z = np.reshape(Z, (Z.size // i, i)) * userscalecorr[2]
 
     x = X[0,:]
     y = Y[:,0]

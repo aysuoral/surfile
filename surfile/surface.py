@@ -49,7 +49,7 @@ class Surface:
 
         self.name = 'Figure'
 
-    def openTxt(self, fname, bplt, typ='x'):
+    def openTxt(self, fname, bplt, userscalecorr=[1.0,1.0,1.0], typ='x'):
         """
         Opens a txt file containing the values of the topography
         see Notes for more information on file format.
@@ -77,7 +77,7 @@ class Surface:
             typ = input("choose txt type [Xyz, Spacez, ...]")
             typ = typ.lower()
         if typ == 'x':
-            self.X, self.Y, self.Z, self.x, self.y = measfile_io.read_xyztxt(fname)
+            self.X, self.Y, self.Z, self.x, self.y = measfile_io.read_xyztxt(fname, userscalecorr)
         if typ == 's':
             self.X, self.Y, self.Z, self.x, self.y = measfile_io.read_spaceZtxt(fname)
 
@@ -159,6 +159,27 @@ class Surface:
         self.X0, self.Y0, self.Z0 = copy.deepcopy(self.X), copy.deepcopy(self.Y), copy.deepcopy(self.Z)
 
         if bplt: self.pltC()
+        
+    def getPoints(self, exclude_nan=False):
+        """
+        Returns the point cloud of the surface as a numpy array
+
+        Parameters
+        ----------
+        exclude_nan : bool
+            If true excludes the non measured points (NaN)
+
+        Returns
+        -------
+        points : np.array
+            The point cloud as an (N, 3) numpy array
+        """
+        if exclude_nan:
+            mask = ~np.isnan(self.Z)
+            points = np.c_[self.X[mask].ravel(), self.Y[mask].ravel(), self.Z[mask].ravel()]
+        else:
+            points = np.c_[self.X.ravel(), self.Y.ravel(), self.Z.ravel()]
+        return points
         
 
     def saveAsc(self, fname):
@@ -252,7 +273,7 @@ class Surface:
         XY = np.vstack([self.X.reshape(np.size(self.X)),
                         self.Y.reshape(np.size(self.Y))]).T
 
-        Zi = interpolate.griddata(XY, self.Z.reshape(np.size(self.Z)), (Xi, Yi), method='cubic')  # 'linear' 'cubic'
+        Zi = interpolate.griddata(XY, self.Z.reshape(np.size(self.Z)), (Xi, Yi), method='linear')  # 'linear' 'cubic'
 
         self.x = xi
         self.y = yi
@@ -260,6 +281,27 @@ class Surface:
         self.X = Xi
         self.Y = Yi
         self.Z = Zi
+        
+    def downsample(self, factor):
+        """
+        Downsamples the topography by an integer factor
+
+        Parameters
+        ----------
+        factor: int
+            The downsampling factor
+            
+        Notes
+        -----
+        <span style="color:orange">This function will be moved to a utility module in the future
+        use with caution !!!</span>.
+        """
+        self.X = self.X[::factor, ::factor]
+        self.Y = self.Y[::factor, ::factor]
+        self.Z = self.Z[::factor, ::factor]
+
+        self.x = self.x[::factor]
+        self.y = self.y[::factor]
 
     def fillNM(self, method='cubic'):
         """
@@ -367,6 +409,14 @@ class Surface:
         profiles = np.apply_along_axis(toPrf, arr=self.Z, axis=1 if axis == 'x' else 0)
 
         return profiles
+    
+    def restore(self):
+        """
+        Restores the original topography
+        """
+        self.X = copy.deepcopy(self.X0)
+        self.Y = copy.deepcopy(self.Y0)
+        self.Z = copy.deepcopy(self.Z0)
 
     #################
     # PLOT SECTION  #
@@ -422,3 +472,9 @@ class Surface:
         
         fig.colorbar(d)
         return fig, ax_2d
+
+    ########################
+    # SPECIAL METHODS     ##
+    ########################
+    def __repr__(self):
+        return f"Surface(name='{self.name}', size={self.Z.shape})"
