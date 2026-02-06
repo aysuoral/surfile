@@ -9,7 +9,7 @@ import copy
 from matplotlib import patches, cm
 
 from surfile import surface, funct, cutter
-from scipy import optimize, signal, ndimage
+from scipy import optimize, signal, ndimage, interpolate
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -51,6 +51,16 @@ class TransformParams:
         eul = rot.as_euler('xyz')
         instance.rx, instance.ry, instance.rz = eul[0], eul[1], eul[2]
         instance.tx, instance.ty, instance.tz = trasl[0], trasl[1], trasl[2]
+        return instance
+    
+    @classmethod
+    def from_file(cls, filename, tr_n, header=1):
+        instance = cls()
+        with open(filename, "r") as f:
+            riga = list(f)[header + tr_n]
+        riga = riga[3:].strip().replace(',', ' ')
+        values = list(map(float, riga.split()))
+        instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = values
         return instance
     
     def get_params(self):
@@ -122,7 +132,7 @@ def _composeFigure(left, right, T, R=None, support=None, sp=20):
     cx.imshow(st, cmap=cm.viridis)
     plt.show()
 
-def make_o3d_cloud(surf: surface.Surface | np.ndarray, color=None, remove_outliers=False) -> o3d.geometry.PointCloud:
+def surface_to_pcd(surf: surface.Surface | np.ndarray, color=None, remove_outliers=False) -> o3d.geometry.PointCloud:
     points = surf.getPoints(exclude_nan=True) if isinstance(surf, surface.Surface) else surf
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(points)
@@ -133,9 +143,83 @@ def make_o3d_cloud(surf: surface.Surface | np.ndarray, color=None, remove_outlie
         pc, _ = pc.remove_statistical_outlier(nb_neighbors=40, std_ratio=3.0)
     return pc
 
+def pcd_to_surface(pcd, dx, dy, bplt=False):
+    """
+    Transforms an o3d.geometry.PointCloud into a Surface object.
+    
+    1. Fits a least-squares plane.
+    2. Projects points onto the plane coordinate system.
+    3. Interpolates onto a regular grid defined by dx, dy.
+    """
+    points = np.asarray(pcd.points)
+
+    # Plane equation: ax + by + d = z  => [x, y, 1][a, b, d]^T = z
+    A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+    C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
+    a, b, d = C 
+    
+    normal = np.array([-a, -b, 1.0])
+    normal /= np.linalg.norm(normal)
+    
+    z_axis = np.array([0, 0, 1])
+    v = np.cross(normal, z_axis)
+    c = np.dot(normal, z_axis)
+    s = np.linalg.norm(v)
+    
+    if s < 1e-9:  # Already aligned
+        R = np.eye(3)
+    else:
+        kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        R = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    
+    centroid = np.mean(points, axis=0)
+    centered_pts = points - centroid
+    rotated_pts = centered_pts @ R.T
+    
+    x_pts = rotated_pts[:, 0]
+    y_pts = rotated_pts[:, 1]
+    z_pts = rotated_pts[:, 2] # These are now distances from the plane
+    
+    x_min, x_max = x_pts.min(), x_pts.max()
+    y_min, y_max = y_pts.min(), y_pts.max()
+    n_x = int(np.ceil((x_max - x_min) / dx))
+    n_y = int(np.ceil((y_max - y_min) / dy))
+    grid_x = np.linspace(x_min, x_min + n_x * dx, n_x)
+    grid_y = np.linspace(y_min, y_min + n_y * dy, n_y)
+    gx, gy = np.meshgrid(grid_x, grid_y)
+    
+    z_sum, _, _ = np.histogram2d(x_pts, y_pts, bins=[grid_x, grid_y], weights=z_pts)
+    
+    # 3. Calculate the count of points in each bin
+    counts, _, _ = np.histogram2d(x_pts, y_pts, bins=[grid_x, grid_y])
+            
+    # Average the bins and fill NaNs
+    z_sum = np.divide(z_sum, counts, out=np.zeros_like(z_sum), where=counts!=0)
+    mean_val = np.nanmean(z_pts)
+    z_sum[counts == 0] = mean_val
+    
+    print(f'[INFO PCD_TO_SUR] Could not bin {z_sum[counts == 0].size} elements')
+
+    # Create the coordinate map (the "query" points in index space)
+    # Since gx and gy are already spaced by dx/dy, their index-space is just a ramp
+    coords = np.array([
+        (gy - y_min) / dy, 
+        (gx - x_min) / dx
+    ])
+    
+    print(f'[INFO PCD_TO_SUR] Converting pc using spacings dx: {dx:.3f} um, dy: {dy:.3f} um')
+    # order=3 is equivalent to cubic interpolation
+    z_map = ndimage.map_coordinates(z_sum, coords, order=1, mode='nearest')
+    
+    surf = surface.Surface()
+    surf.setValues(dx, dy, z_map, bplt=bplt)
+    plt.show()
+    
+    return surf
+
 def merge_and_downsample_point_cloud(points1, points2, voxel_size=0.001):
     combined = np.vstack([points1, points2])
-    pc = make_o3d_cloud(combined)
+    pc = surface_to_pcd(combined)
     pc_down = pc.voxel_down_sample(voxel_size=voxel_size)
     return np.asarray(pc_down.points)
 
@@ -170,7 +254,7 @@ def isolate_common_points(fixed_points_pc, moving_points_pc, stitchprc):
     moving_subset = moving_points[norm * stitchprc / 100 <= -dist_moving]
     
     # show_point_cloud([make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset), fixed_points_pc, moving_points_pc], defined_colors=True)
-    return make_o3d_cloud(fixed_subset), make_o3d_cloud(moving_subset)
+    return surface_to_pcd(fixed_subset), surface_to_pcd(moving_subset)
 
 def apply_transform(params: TransformParams, points, params0: TransformParams=None):
     """
@@ -467,28 +551,17 @@ class SurfaceStitcher:
             The list of surfaces to be stitched, in the order they were acquired
         robotTfile : str
             The path of the file containing the robot positions and rotations
-        """
-        def read_robot_positions_rotations(file_robot):
-            tras: TransformParams = []
-            with open(file_robot, "r") as f:
-                f.readline() # skip first line
-                for riga in f:
-                    riga = riga[3:].strip().replace(',', ' ')
-                    
-                    valori = list(map(float, riga.split()))
-                    tr = TransformParams.from_list(valori)
-                    tr.rescale(1000)  # convert to um
-                    if len(valori) != 6:
-                        continue
-                    tras.append(tr)
-            return tras
-        
+        """        
         point_clouds = []
-        for surf in surfaces:
-            pc = make_o3d_cloud(surf, remove_outliers=True)
+        robot_trans = []
+        for i, surf in enumerate(surfaces):
+            pc = surface_to_pcd(surf, remove_outliers=True)
             point_clouds.append(pc)
             
-        robot_trans = read_robot_positions_rotations(robotTfile)
+            tr = TransformParams.from_file(robotTfile, i, header=1)
+            tr.rescale(1000)
+            robot_trans.append(tr)
+            
         print(f"[INFO ROBOT STITCH] Loaded {len(robot_trans)} robot transformations for {len(point_clouds)} surfaces")
         
         point_clouds_T = []
@@ -496,22 +569,21 @@ class SurfaceStitcher:
         for pc, trasf in zip(point_clouds, robot_trans):
             pts = np.asarray(pc.points)
             pts_T = apply_transform(trasf, pts, params0=robot_trans[0])
-            point_clouds_T.append(make_o3d_cloud(pts_T))
+            point_clouds_T.append(surface_to_pcd(pts_T))
             fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
         
-        fixed_ref_pc = make_o3d_cloud(fixed_ref)
+        fixed_ref_pc = surface_to_pcd(fixed_ref)
         if bplt: 
             show_point_cloud([fixed_ref_pc], name="Stitched Point Cloud from Robot Poses", defined_colors=False)
-            show_point_cloud(point_clouds_T, name="Stitched Point Cloud from Robot Poses", defined_colors=True)
+            # show_point_cloud(point_clouds_T, name="Stitched Point Cloud from Robot Poses", defined_colors=True)
+        
+        pcd_to_surface(fixed_ref_pc, surfaces[0].dx * 1.5, surfaces[0].dy * 1.5, bplt=True)
         
         return fixed_ref_pc, point_clouds_T
-        
-        
-        
-        
-        
-        
-        
+
+
+
+
     # @staticmethod
     # def stitchSSDminimize(surl, surr, stitchPrc=20, bplt=False):
     #     """

@@ -302,6 +302,9 @@ class Surface:
 
         self.x = self.x[::factor]
         self.y = self.y[::factor]
+        
+        self.dx *= factor
+        self.dy *= factor
 
     def fillNM(self, method='cubic'):
         """
