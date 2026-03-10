@@ -258,8 +258,8 @@ def merge_and_downsample_point_cloud(pc1: np.ndarray, pc2: np.ndarray, voxel_siz
     return np.asarray(pc_down.points)
 
 @ensure_o3d_pc
-def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], uniform_colors=False):    
-    if uniform_colors: 
+def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], uniform_colors=False):
+    if uniform_colors:
         point_clouds = assign_defined_colors_to_point_clouds(point_clouds)
     o3d.visualization.draw_geometries(point_clouds)
 
@@ -292,10 +292,10 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
 
     return point_clouds
 
-def isolate_common_points(fixed_points: np.ndarray, moving_points: np.ndarray, stitchprc, bplt=False):    
-    fixed_center = np.mean(fixed_points, axis=0)
-    moving_center = np.mean(moving_points, axis=0)
-    
+def isolate_common_points_geometrical(fixed_pts, moving_pts, stitchprc=80, bplt=False):
+    fixed_center = np.mean(fixed_pts, axis=0)
+    moving_center = np.mean(moving_pts, axis=0)
+
     # direzione movimento
     moving_dir = moving_center - fixed_center
     norm = np.linalg.norm(moving_dir)
@@ -305,19 +305,57 @@ def isolate_common_points(fixed_points: np.ndarray, moving_points: np.ndarray, s
         moving_dir /= norm
 
     # filtra punti entro stitchprc
-    dist_fixed = (fixed_points - fixed_center) @ moving_dir
-    fixed_subset = fixed_points[dist_fixed <= norm * (1 - stitchprc / 100)]
+    dist_fixed = (fixed_pts - fixed_center) @ moving_dir
+    fixed_subset = fixed_pts[dist_fixed >= norm * (1 - stitchprc / 100)]
     
-    dist_moving = (moving_points - moving_center) @ moving_dir
-    moving_subset = moving_points[norm * (1 - stitchprc / 100) <= -dist_moving]
-    
+    dist_moving = (moving_pts - moving_center) @ moving_dir
+    moving_subset = moving_pts[norm * (1 - stitchprc / 100) <= -dist_moving]
+
     if bplt:
         show_point_cloud([
-            surface_to_pcd(fixed_subset), 
-            surface_to_pcd(moving_subset), 
-            surface_to_pcd(fixed_points), 
-            surface_to_pcd(moving_points)])
+            fixed_subset, 
+            moving_subset, 
+            fixed_pts,
+            moving_pts
+            ], uniform_colors=True)
+    
     return fixed_subset, moving_subset
+
+def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+    x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
+
+    make_mask = lambda pts: (
+        (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
+        (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
+        (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
+    )
+
+    fixed_subset = fixed_pts[make_mask(fixed_pts)]
+    moving_subset = moving_pts[make_mask(moving_pts)]
+
+    if bplt:
+        show_point_cloud([
+            fixed_subset, 
+            moving_subset, 
+            fixed_pts,
+            moving_pts
+            ], uniform_colors=True)
+
+    return fixed_subset, moving_subset
+
+
+def get_common_boundries(pts_a, pts_b):
+    min_a = np.min(pts_a, axis=0)
+    max_a = np.max(pts_a, axis=0)
+
+    min_b = np.min(pts_b, axis=0)
+    max_b = np.max(pts_b, axis=0)
+
+    x_common = (max(min_a[0], min_b[0]), min(max_a[0], max_b[0]))   
+    y_common = (max(min_a[1], min_b[1]), min(max_a[1], max_b[1]))
+    z_common = (max(min_a[2], min_b[2]), min(max_a[2], max_b[2]))
+
+    return x_common, y_common, z_common
 
 def mutual_points_RMSE(fixed_points, moving_points):
     fixed_tree = cKDTree(fixed_points)
@@ -695,40 +733,86 @@ class SurfaceStitcher:
         return fixed_ref, point_clouds_T
 
     @staticmethod
-    def stitchRMSE(point_clouds: list[np.ndarray], bplt=False):
-        def optimize_alignment(fixed_points, moving_points):
-            def objective(params: list):
-                transformed = apply_transform(moving_points, TransformParams.from_list(params))
-                fixed_subset, moving_subset = isolate_common_points(fixed_points, transformed)
-                return mutual_points_RMSE(fixed_points, transformed)
-            
-            t_nom = [0,0,0,0,0,0]
-            U_tx, U_ty, U_tz = 0.0552, 0.0606, 0.0693  # mm
-            U_theta = 0.001  # gradi
+    def stitchRMSE(point_clouds_T, n_calls, isolator, bplt=False):
+        def hard_rmse(fixed_pts, moving_pts):
+            fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
 
-            search_space = [
-                Real(t_nom[0]-U_tx, t_nom[0]+U_tx),
-                Real(t_nom[1]-U_ty, t_nom[1]+U_ty),
-                Real(t_nom[2]-U_tz, t_nom[2]+U_tz),
-                Real(t_nom[3]-U_theta, t_nom[3]+U_theta),
-                Real(t_nom[4]-U_theta, t_nom[4]+U_theta),
-                Real(t_nom[5]-U_theta, t_nom[5]+U_theta)]
+            fixed_tree = cKDTree(fixed_subset)
+            moving_tree = cKDTree(moving_subset)
+
+            dist_f2m, idx_f2m = moving_tree.query(fixed_subset, k=1, workers= -1)
+            dist_m2f, idx_m2f = fixed_tree.query(moving_subset, k=1, workers= -1)
+
+            mask = (np.arange(len(fixed_subset)) == idx_m2f[idx_f2m])
+            if not np.any(mask):
+                return float('inf')
+
+            diffs = fixed_subset[mask] - moving_subset[idx_f2m[mask]]
+            rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
+            npoints.append(len(diffs))
+            rmses.append(rmse)
+            return rmse
+
+        def optimize(fixed_pts, moving_pts):
+            U_tx, U_ty, U_tz = 55.2, 60.6, 69.3  
+            U_theta = 0.5  
+
+            # tx ty tz rx ry rz
+            t0 = [0, 0, 0, 0, 0, 0]
+
+            def objective(x):
+                p = TransformParams.from_list(x)
+                moved = apply_transform(moving_pts, p)
+                
+                return hard_rmse(fixed_pts, moved)
+
+            space = [
+                Real(t0[0] - U_tx, t0[0] + U_tx),
+                Real(t0[1] - U_ty, t0[1] + U_ty),
+                Real(t0[2] - U_tz, t0[2] + U_tz),
+                Real(t0[3] - U_theta, t0[3] + U_theta),
+                Real(t0[4] - U_theta, t0[4] + U_theta),
+                Real(t0[5] - U_theta, t0[5] + U_theta),
+            ]
+
+            res = gp_minimize(objective, space, x0=t0, n_calls=n_calls, random_state=42)
+
+            best = res.x
+            best_p = TransformParams.from_list(best)
             
-            res = gp_minimize(objective, search_space, x0=t_nom, n_calls=50, random_state=42)
-            
-            aligned_points = apply_transform(moving_points, res.x)
-            return aligned_points, res.x, float(res.fun)
-            
-        point_clouds_T = []
-        fixed_ref = point_clouds[0].points
-        for pc in point_clouds:
-            pts = np.asarray(pc.points)
-            pts_T, _, _ = optimize_alignment(fixed_ref_pc, pts)
-            point_clouds_T.append(surface_to_pcd(pts_T))
-            fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
+            aligned = apply_transform(moving_pts, best_p)
+
+            return aligned, res
         
-        fixed_ref_pc = surface_to_pcd(fixed_ref)
-        if bplt: 
-            show_point_cloud([fixed_ref_pc])
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            rmses = []
+            npoints = []
             
-        return fixed_ref_pc, point_clouds_T
+            moving = np.asarray(pc)
+            print(f'[INFO RMSE] Optimizing image {i}')
+            optimized_moving, _ = optimize(fixed, moving)
+
+            fixed = np.vstack([fixed, optimized_moving])
+
+            if bplt:
+                fig, (ax, bx) = plt.subplots(2, 1)
+                ax.set_title(f'Image {i} opt')
+                
+                ax.plot(range(1, n_calls+1), rmses)
+                ax.set_xlabel("Number of call")
+                ax.set_ylabel("RMSE")
+                ax.grid(True)
+
+                bx.plot(range(1, n_calls+1), npoints)
+                bx.set_xlabel("Number of call")
+                bx.set_ylabel("npoints")
+                bx.grid(True)
+
+        fixed_pc = fixed
+
+        if bplt:
+            show_point_cloud([fixed_pc])
+
+        return fixed_pc
