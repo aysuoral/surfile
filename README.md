@@ -34,7 +34,7 @@ gh repo clone andeledea/surfile
 ```
 Check the dependencies
 ```bash
-pip install matplotlib circle_fit alive_progress open3d csaps igor numpy scipy
+pip install matplotlib circle_fit alive_progress open3d csaps igor numpy scipy scikit-optimize
 ```
 Try this simple example
 ```python
