@@ -188,7 +188,7 @@ class TransformParams:
         instance = cls()
         instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = params
         return instance
-    
+
     @classmethod
     def from_tuples(cls, rot: R, trasl: np.ndarray):
         instance = cls()
@@ -226,16 +226,20 @@ class TransformParams:
         return f"TransformParams: {self.get_matrix()}"
 
 @ensure_numpy_pcd
-def apply_transform(points: np.ndarray, params: TransformParams, params0: TransformParams=None):
+def apply_transform(points: np.ndarray, params: TransformParams | np.ndarray, params0: TransformParams | np.ndarray=None):
     """
     Applies a transformation on the points, if params0 is provided
     performs the transformation relative to the 0 transformation
     """
-    T = params.get_matrix()
+    if hasattr(params, 'get_matrix'):
+        T = params.get_matrix()
+    else: T = params
     
     if params0 is not None:
-        # perform a relative transform
-        T0 = params0.get_matrix()
+        if hasattr(params0, 'get_matrix'):
+            T0 = params0.get_matrix()
+        else: T0 = params0
+
         T0_inv = np.linalg.inv(T0)
         
         T = T0_inv @ T
@@ -733,7 +737,34 @@ class SurfaceStitcher:
         return fixed_ref, point_clouds_T
 
     @staticmethod
-    def stitchRMSE(point_clouds_T, n_calls, isolator, bplt=False):
+    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator, bplt=False):
+        """
+        Finds the best alignment between transformed point clouds
+        by minimizing the RMSE between mutually matched points
+        in the overlapping regions.
+
+        Parameters
+        ----------
+        point_clouds_T : list[np.ndarray]
+            List of transformed point clouds, in the order they
+            will be stitched together
+        n_calls : int
+            Number of optimization calls used by gp_minimize
+            during the RMSE minimization
+        isolator : callable
+            Function that takes fixed_pts and moving_pts and returns
+            the overlapping subsets to be compared
+        bplt : bool
+            If true plots the RMSE and number of matched points
+            during each optimization, and shows the final stitched
+            point cloud
+
+        Returns
+        -------
+        fixed_pc : np.ndarray
+            The final stitched point cloud after sequentially
+            aligning and merging all point clouds
+        """
         def hard_rmse(fixed_pts, moving_pts):
             fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
 
@@ -816,3 +847,86 @@ class SurfaceStitcher:
             show_point_cloud([fixed_pc])
 
         return fixed_pc
+    
+    @staticmethod
+    def stitchICP(point_clouds_T: list[np.ndarray], threshold, isolator=None, bplt=False):
+        """
+        Refines the alignment of transformed point clouds using ICP.
+
+        The first point cloud is taken as the fixed reference. Each subsequent
+        point cloud is aligned to the accumulated fixed point cloud by using
+        Iterative Closest Point (ICP), then merged into the final stitched
+        result. If an isolator function is provided, ICP is applied only on the
+        isolated overlapping regions, while the resulting transformation is
+        applied to the full moving point cloud.
+
+        Parameters
+        ----------
+        point_clouds_T : list[np.ndarray]
+            List of transformed point clouds to be stitched, in the order they
+            were acquired. Each point cloud is expected to be an array of shape
+            (N, 3).
+        threshold : float
+            Maximum correspondence distance used by ICP.
+        isolator : callable, optional
+            Function that takes ``fixed_pts`` and ``moving_pts`` as input and
+            returns ``fixed_subset, moving_subset`` to restrict ICP to a common
+            region. If None, ICP is applied to the full point clouds.
+        bplt : bool, optional
+            If True, displays the final stitched point cloud.
+
+        Returns
+        -------
+        fixed_pc : np.ndarray
+            Final stitched point cloud obtained after sequential ICP alignment
+            and merging.
+
+        Notes
+        -----
+        This method assumes that the input point clouds are already roughly
+        aligned, for example by a prior robot-based transformation. ICP is then
+        used only as a refinement step.
+        """
+        def optimize(fixed_pts, moving_pts):
+
+            if isolator != None:
+                fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
+                pc_fixed = pcd_to_o3d_pcd(fixed_subset)
+                pc_moving = pcd_to_o3d_pcd(moving_subset)
+            
+            else:
+                pc_fixed = pcd_to_o3d_pcd(fixed_pts)
+                pc_moving = pcd_to_o3d_pcd(moving_pts)
+
+            trans_init = np.eye(4)
+
+            reg_p2p = o3d.pipelines.registration.registration_icp(
+                pc_moving, pc_fixed, threshold, trans_init,
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=1000))
+            
+            aligned = apply_transform(moving_pts, reg_p2p.transformation)
+
+            return aligned, reg_p2p
+        
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            moving = np.asarray(pc)
+
+            print(f"[INFO ICP] Optimizing image {i}")
+
+            optimized_moving, _ = optimize(fixed, moving)
+
+            fixed = np.vstack([fixed, optimized_moving])
+
+        fixed_pc = fixed
+
+        if bplt:
+            show_point_cloud([fixed_pc])
+
+        return fixed_pc
+
+
+
+
