@@ -296,57 +296,119 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
 
     return point_clouds
 
-def isolate_common_points_geometrical(fixed_pts, moving_pts, stitchprc=80, bplt=False):
-    fixed_center = np.mean(fixed_pts, axis=0)
-    moving_center = np.mean(moving_pts, axis=0)
+class Isolator():
+    geometrical: str = 'geometrical'
+    maxmin: str = 'maxmin'
 
-    # direzione movimento
-    moving_dir = moving_center - fixed_center
-    norm = np.linalg.norm(moving_dir)
-    if norm == 0:
-        moving_dir = np.array([1.0, 0.0, 0.0])
-    else:
-        moving_dir /= norm
+    type: str
 
-    # filtra punti entro stitchprc
-    dist_fixed = (fixed_pts - fixed_center) @ moving_dir
-    fixed_subset = fixed_pts[dist_fixed >= norm * (1 - stitchprc / 100)]
+    def __init__(self, type: str, stitchprc=80):
+        self.type = type
+        self.stitchprc = stitchprc
+
+    def apply_isolator(self, fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+        if self.type == 'geometrical': return self.isolate_common_points_geometrical(fixed_pts, moving_pts, self.stitchprc, bplt)
+        elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, bplt)
+        else:
+            raise ValueError('Unknown isolator type')
     
-    dist_moving = (moving_pts - moving_center) @ moving_dir
-    moving_subset = moving_pts[norm * (1 - stitchprc / 100) <= -dist_moving]
+    @staticmethod
+    def plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts): 
+        show_point_cloud([fixed_subset, moving_subset, fixed_pts, moving_pts], uniform_colors=True)
 
-    if bplt:
-        show_point_cloud([
-            fixed_subset, 
-            moving_subset, 
-            fixed_pts,
-            moving_pts
-            ], uniform_colors=True)
+    @staticmethod
+    def isolate_common_points_geometrical(fixed_pts: np.ndarray, moving_pts: np.ndarray, stitchprc=80, bplt=False):
+        fixed_center = np.mean(fixed_pts, axis=0)
+        moving_center = np.mean(moving_pts, axis=0)
+
+        # direzione movimento
+        moving_dir = moving_center - fixed_center
+        norm = np.linalg.norm(moving_dir)
+        if norm == 0:
+            moving_dir = np.array([1.0, 0.0, 0.0])
+        else:
+            moving_dir /= norm
+
+        # filtra punti entro stitchprc
+        dist_fixed = (fixed_pts - fixed_center) @ moving_dir
+        fixed_subset = fixed_pts[dist_fixed >= norm * (1 - stitchprc / 100)]
+        
+        dist_moving = (moving_pts - moving_center) @ moving_dir
+        moving_subset = moving_pts[norm * (1 - stitchprc / 100) <= -dist_moving]
+
+        if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
+        
+        return fixed_subset, moving_subset
+
+    @staticmethod
+    def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+        x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
+
+        make_mask = lambda pts: (
+            (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
+            (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
+            (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
+        )
+
+        fixed_subset = fixed_pts[make_mask(fixed_pts)]
+        moving_subset = moving_pts[make_mask(moving_pts)]
+
+        if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
+
+        return fixed_subset, moving_subset
+
+class Thresholder():
+    type: str
+
+    value: str = 'value'
+    sphere: str = 'sphere'
+    cuboid: str = 'cuboid'
+    KDTree: str = 'KDTree'
+
+    def __init__(self, type: str, val=20, threshold_expansion=1.2):
+        self.type = type
+        self.threshold_expansion = threshold_expansion
+        self.val = val
+
+    def apply_thresholder(self, fixed_subset, moving_subset):
+        if self.type == 'value': return self.threshold_value(self.val)
+        elif self.type == 'sphere': return self.threshold_sphere(fixed_subset, moving_subset)
+        elif self.type == 'cuboid': return self.threshold_cuboid(fixed_subset, moving_subset, self.threshold_expansion)
+        elif self.type == 'KDTree': return self.threshold_KDTree(fixed_subset, moving_subset, self.threshold_expansion)
+        else:
+            raise ValueError('Unknown thresholder type')
     
-    return fixed_subset, moving_subset
+    @staticmethod    
+    def threshold_value(x): return x
+    
+    @staticmethod
+    def threshold_sphere(fixed_subset, moving_subset):
+        c_fixed = np.mean(fixed_subset, axis=0)
+        c_moving = np.mean(moving_subset, axis=0)
 
-def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
-    x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
+        r_fixed = ...
+        r_moving = ...
+    
+    @staticmethod
+    def threshold_cuboid(fixed_subset, moving_subset, threshold_expansion=3):
+        x_mM, y_mM, z_mM = get_common_boundries(fixed_subset, moving_subset)
 
-    make_mask = lambda pts: (
-        (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
-        (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
-        (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
-    )
+        x_overlap = max(0, x_mM[1] - x_mM[0])
+        y_overlap = max(0, y_mM[1] - y_mM[0])
+        z_overlap = max(0, z_mM[1] - z_mM[0])
 
-    fixed_subset = fixed_pts[make_mask(fixed_pts)]
-    moving_subset = moving_pts[make_mask(moving_pts)]
+        volume = x_overlap * y_overlap * z_overlap
+        threshold = threshold_expansion * (volume ** (1/3))
 
-    if bplt:
-        show_point_cloud([
-            fixed_subset, 
-            moving_subset, 
-            fixed_pts,
-            moving_pts
-            ], uniform_colors=True)
+        return threshold
+    
+    @staticmethod
+    def threshold_KDTree(fixed_subset, moving_subset, threshold_expansion=1.2):
+        diffs = KDTree_mutual_diffs(fixed_subset, moving_subset)
+        threshold = np.mean(np.abs(diffs))
+        threshold_dev = np.std(np.abs(diffs))
 
-    return fixed_subset, moving_subset
-
+        return threshold * threshold_expansion
 
 def get_common_boundries(pts_a, pts_b):
     min_a = np.min(pts_a, axis=0)
@@ -361,7 +423,7 @@ def get_common_boundries(pts_a, pts_b):
 
     return x_common, y_common, z_common
 
-def mutual_points_RMSE(fixed_points, moving_points):
+def KDTree_mutual_diffs(fixed_points, moving_points):
     fixed_tree = cKDTree(fixed_points)
     moving_tree = cKDTree(moving_points)
 
@@ -373,10 +435,7 @@ def mutual_points_RMSE(fixed_points, moving_points):
         return float('inf')
     
     diffs = fixed_points[mask] - moving_points[idx_f2m[mask]]
-    rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
-    return rmse
-
-
+    return diffs
 
 def _composeFigure(left, right, T, R=None, support=None, sp=20):
     """
@@ -737,7 +796,7 @@ class SurfaceStitcher:
         return fixed_ref, point_clouds_T
 
     @staticmethod
-    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator, bplt=False):
+    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator: Isolator, bplt=False):
         """
         Finds the best alignment between transformed point clouds
         by minimizing the RMSE between mutually matched points
@@ -765,25 +824,6 @@ class SurfaceStitcher:
             The final stitched point cloud after sequentially
             aligning and merging all point clouds
         """
-        def hard_rmse(fixed_pts, moving_pts):
-            fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
-
-            fixed_tree = cKDTree(fixed_subset)
-            moving_tree = cKDTree(moving_subset)
-
-            dist_f2m, idx_f2m = moving_tree.query(fixed_subset, k=1, workers= -1)
-            dist_m2f, idx_m2f = fixed_tree.query(moving_subset, k=1, workers= -1)
-
-            mask = (np.arange(len(fixed_subset)) == idx_m2f[idx_f2m])
-            if not np.any(mask):
-                return float('inf')
-
-            diffs = fixed_subset[mask] - moving_subset[idx_f2m[mask]]
-            rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
-            npoints.append(len(diffs))
-            rmses.append(rmse)
-            return rmse
-
         def optimize(fixed_pts, moving_pts):
             U_tx, U_ty, U_tz = 55.2, 60.6, 69.3  
             U_theta = 0.5  
@@ -794,8 +834,14 @@ class SurfaceStitcher:
             def objective(x):
                 p = TransformParams.from_list(x)
                 moved = apply_transform(moving_pts, p)
+
+                fixed_sub, moved_sub = isolator.apply_isolator(fixed_pts, moved, bplt=False)
+                diffs = KDTree_mutual_diffs(fixed_sub, moved_sub)
+                rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
                 
-                return hard_rmse(fixed_pts, moved)
+                npoints.append(len(diffs))
+                rmses.append(rmse)
+                return rmse
 
             space = [
                 Real(t0[0] - U_tx, t0[0] + U_tx),
@@ -849,7 +895,7 @@ class SurfaceStitcher:
         return fixed_pc
     
     @staticmethod
-    def stitchICP(point_clouds_T: list[np.ndarray], threshold, isolator=None, bplt=False):
+    def stitchICP(point_clouds_T: list[np.ndarray], thresholder: Thresholder, isolator: None | Isolator, bplt=False):
         """
         Refines the alignment of transformed point clouds using ICP.
 
@@ -890,15 +936,16 @@ class SurfaceStitcher:
         def optimize(fixed_pts, moving_pts):
 
             if isolator != None:
-                fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
-                pc_fixed = pcd_to_o3d_pcd(fixed_subset)
-                pc_moving = pcd_to_o3d_pcd(moving_subset)
-            
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts)
             else:
-                pc_fixed = pcd_to_o3d_pcd(fixed_pts)
-                pc_moving = pcd_to_o3d_pcd(moving_pts)
+                fixed_subset, moving_subset = fixed_pts, moving_pts
+
+            pc_fixed = pcd_to_o3d_pcd(fixed_subset)
+            pc_moving = pcd_to_o3d_pcd(moving_subset)
 
             trans_init = np.eye(4)
+            threshold = thresholder.apply_thresholder(fixed_subset, moving_subset)
+            print(f'{threshold=}')
 
             reg_p2p = o3d.pipelines.registration.registration_icp(
                 pc_moving, pc_fixed, threshold, trans_init,
@@ -926,7 +973,4 @@ class SurfaceStitcher:
             show_point_cloud([fixed_pc])
 
         return fixed_pc
-
-
-
 
