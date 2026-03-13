@@ -163,8 +163,6 @@ def pcd_to_o3d_pcd(pcd: np.ndarray) -> o3d.geometry.PointCloud:
     
     return pc
 
-
-
 class TransformParams:
     rx: float
     ry: float
@@ -246,8 +244,6 @@ def apply_transform(points: np.ndarray, params: TransformParams | np.ndarray, pa
         
     pts_h = np.hstack([points, np.ones((points.shape[0], 1))])
     return (T @ pts_h.T).T[:, :3]
-
-
 
 @ensure_o3d_pc
 def remove_outliers_from_point_cloud(point_cloud: o3d.geometry.PointCloud) -> np.ndarray:
@@ -488,6 +484,62 @@ def _composeFigure(left, right, T, R=None, support=None, sp=20):
     cx.imshow(st, cmap=cm.viridis)
     plt.show()
 
+@ensure_numpy_pcd
+def rescale_point_cloud(point_clouds: list[np.ndarray], scales=None, revert=False):
+    """
+    Rescale a list of point clouds along x, y, and z axes.
+
+    If `scales` is not provided, the scale factors are computed from the
+    first point cloud in the list as:
+
+        scales = maxs - mins
+
+    where `mins` and `maxs` are the per-axis minimum and maximum values of
+    the reference point cloud. The same scale factors are then applied to
+    all point clouds in the list.
+
+    If `revert` is True, the inverse scaling is applied by using `1 / scales`.
+
+    Parameters
+    ----------
+    point_clouds : list[np.ndarray]
+        List of point clouds, each of shape (N, 3).
+    scales : np.ndarray or None, optional
+        Array of shape (3,) containing the scale factors for x, y, and z.
+        If None, the factors are computed from the first point cloud.
+    revert : bool, optional
+        If True, apply the inverse scaling factors instead of the direct
+        scaling factors. Default is False.
+
+    Returns
+    -------
+    scaled_list : list[np.ndarray]
+        List of rescaled point clouds.
+    scales : np.ndarray
+        The scale factors that were used.
+
+    Notes
+    -----
+    This function only divides coordinates by the scale factors.
+    It does not shift the point clouds by subtracting their minimum values.
+    Therefore, the output is not guaranteed to lie in the [0, 1] range.
+    """
+    if scales is None:
+        ref = point_clouds[0]
+
+        mins = ref.min(axis=0)
+        maxs = ref.max(axis=0)
+        scales = maxs - mins
+
+    scaled_list = []
+    scales = 1 / scales if revert else scales
+
+    for pts in point_clouds:
+        pts_scaled = pts / scales
+        scaled_list.append(pts_scaled)
+
+    return scaled_list, scales
+
 class SurfaceStitcher:
     @staticmethod
     def stitchCorrelation(surl, surr, stitchPrc=20, samplingPrc=50, correlateDer=True, bplt=False):
@@ -593,168 +645,6 @@ class SurfaceStitcher:
                            sp=stitchPrc)
 
     @staticmethod
-    def stitchFGR(surl, surr, stitchPrc=20):
-        """
-        Finds the best allignment between surl and surr
-        by first registering approximatively the 2 images
-        using a FGR feature matcher, and then improves
-        the result by refining with an ICP (iterative closest point)
-        registration
-
-        ref: http://www.open3d.org/docs/0.9.0/python_api/open3d.registration.html
-        FGR: http://vladlen.info/papers/fast-global-registration.pdf
-        ICP: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=121791
-        PFH: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=5152473
-
-        Parameters
-        ----------
-        surl : surface.Surface
-            The left image to be stitched
-        surr : surface.Surface
-            The right image to be stitched
-        stitchPrc : int
-            the percentage of the image overlapping
-        """
-        if surl.Z.shape != surr.Z.shape:
-            raise ValueError("[ERROR FGR] surl and surr must have the same shape for FGR stitching")
-
-        len = int(surl.Z.shape[1] * stitchPrc / 100)
-        
-        # find the interested zones to be stitched
-        lZone = copy.deepcopy(surl.Z[:, -len:])
-        rZone = copy.deepcopy(surr.Z[:, :len])
-        
-        print(f'[INFO FGR] {lZone.shape=}, {rZone.shape=}')
-
-        # scale parameter for normalization
-        scale = 1
-
-        scalez = np.max([lZone.max(), rZone.max()]) * 2 * scale  # re-range [-scale * 0.5, scale * 0.5]
-        lZone /= scalez
-        rZone /= scalez
-
-        # scale xy max dimention
-        if lZone.shape[1] > lZone.shape[0]:
-            scaley = lZone.shape[0] * scale / lZone.shape[1]
-            scalefactor = lZone.shape[1]
-
-            X = np.linspace(0, scale, lZone.shape[1])
-            Y = np.linspace(0, scaley, lZone.shape[0])
-        else:
-            scalex = lZone.shape[1] * scale / lZone.shape[0]
-            scalefactor = lZone.shape[0]
-
-            X = np.linspace(0, scalex, lZone.shape[1])
-            Y = np.linspace(0, scale, lZone.shape[0])
-        mesh_x, mesh_y = np.meshgrid(X, Y)
-
-        def toPC(zone):
-            xyz = np.zeros((np.size(mesh_x), 3))
-            xyz[:, 0] = np.reshape(mesh_x, -1)
-            xyz[:, 1] = np.reshape(mesh_y, -1)
-            xyz[:, 2] = np.reshape(zone, -1)
-
-            # Pass xyz to Open3D.o3d.geometry.PointCloud and visualize
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(xyz)
-
-            return pcd
-
-        pcd_l = toPC(lZone)
-        pcd_r = toPC(rZone)
-        
-        print(pcd_l)
-        
-        # exit()
-
-        def draw_registration_result(source, target, transformation):
-            source_temp = copy.deepcopy(source)
-            target_temp = copy.deepcopy(target)
-            source_temp.paint_uniform_color(np.array([139, 0, 0]) / 255)
-            target_temp.paint_uniform_color(np.array([0, 0, 139]) / 255)
-            source_temp.transform(transformation)
-            o3d.visualization.draw_geometries([source_temp, target_temp])
-
-        def preprocess_point_cloud(pcd, voxel_size):
-            print("[INFO FGR] Downsample with a voxel size %.3f." % voxel_size)
-            pcd_down = pcd.voxel_down_sample(voxel_size)
-
-            radius_normal = voxel_size * 2
-            print("[INFO FGR] Estimate normal with search radius %.3f." % radius_normal)
-            pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
-
-            radius_feature = voxel_size * 5
-            print("[INFO FGR] Compute FPFH feature with search radius %.3f." % radius_feature)
-            pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-                pcd_down,
-                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
-            )
-            return pcd_down, pcd_fpfh
-
-        def prepare_dataset(voxel_size):
-            source = pcd_l
-            target = pcd_r
-
-            source_down, source_fpfh = preprocess_point_cloud(source, voxel_size)
-            target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
-            
-            # o3d.visualization.draw_geometries([source_down])
-            # o3d.visualization.draw_geometries([target_down])
-            
-            return source, target, source_down, target_down, source_fpfh, target_fpfh
-
-        def execute_global_registration(source_down, target_down, source_fpfh,
-                                        target_fpfh, voxel_size):
-            distance_threshold = voxel_size * 0.5
-            print("[INFO FGR] FGR registration on downsampled point clouds.")
-            print("[INFO FGR] downsampling voxel size is %.3f," % voxel_size)
-            print("[INFO FGR] distance threshold %.3f." % distance_threshold)
-            result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
-                source_down, target_down, source_fpfh, target_fpfh,
-                o3d.pipelines.registration.FastGlobalRegistrationOption(
-                    maximum_correspondence_distance=distance_threshold)
-            )
-            return result
-
-        voxel_size = 0.02 * scale
-        source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size)
-
-        result_fgr = execute_global_registration(source_down, target_down,
-                                                 source_fpfh, target_fpfh,
-                                                 voxel_size)
-        print(result_fgr)
-        print("[INFO FGR] Transformation is:")
-        print(result_fgr.transformation)
-        draw_registration_result(source_down, target_down, result_fgr.transformation)
-
-        print("[INFO FGR] Refine with point-to-point ICP")
-        # actually FGR should not need this step
-        distance_threshold = 0.001 * scale
-        reg_p2p = o3d.pipelines.registration.registration_icp(
-            source, target, distance_threshold,
-            init=result_fgr.transformation,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(True))
-        print(reg_p2p)
-        print("[INFO FGR] Transformation is:")
-        print(reg_p2p.transformation)
-        draw_registration_result(source, target, reg_p2p.transformation)
-
-        # Transformation matrix in the form:
-        # [[ 1 , -si, +be, xt],
-        #  [+si,  1 , -al, yt],
-        #  [-be, +al,  1 , zt],
-        #  [ 0 ,  0 ,  0 ,  1]]
-
-        xtransl = int(reg_p2p.transformation[0, 3] * scalefactor)
-        ytransl = int(reg_p2p.transformation[1, 3] * scalefactor)
-        ztransl = reg_p2p.transformation[2, 3] * scalez
-        _composeFigure(surl.Z, surr.Z,
-                       T=[xtransl, ytransl, 'best'],
-                       # R=reg_p2p.transformation[0:3, 0:3],  # this doesn't seem right
-                       # support=(surl.X, surl.Y),
-                       sp=stitchPrc)
-
-    @staticmethod
     @ensure_numpy_pcd
     def stitchRobot(point_clouds: list[np.ndarray], robotTfile, bplt=False):
         """
@@ -796,6 +686,7 @@ class SurfaceStitcher:
         return fixed_ref, point_clouds_T
 
     @staticmethod
+    @ensure_numpy_pcd
     def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator: Isolator, bplt=False):
         """
         Finds the best alignment between transformed point clouds
@@ -895,6 +786,7 @@ class SurfaceStitcher:
         return fixed_pc
     
     @staticmethod
+    @ensure_numpy_pcd
     def stitchICP(point_clouds_T: list[np.ndarray], thresholder: Thresholder, isolator: None | Isolator, bplt=False):
         """
         Refines the alignment of transformed point clouds using ICP.
@@ -974,3 +866,77 @@ class SurfaceStitcher:
 
         return fixed_pc
 
+    @staticmethod
+    @ensure_numpy_pcd
+    def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, bplt=False):
+
+        def optimize(fixed_pts, moving_pts):
+
+            if isolator != None:
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts)
+            else:
+                fixed_subset, moving_subset = fixed_pts, moving_pts
+
+            pc_fixed = pcd_to_o3d_pcd(fixed_subset)
+            pc_moving = pcd_to_o3d_pcd(moving_subset)
+
+            print("before downsample:", np.asarray(pc_fixed.points).shape, np.asarray(pc_moving.points).shape)
+
+            pc_fixed_down = pc_fixed.voxel_down_sample(voxel_size)
+            pc_moving_down = pc_moving.voxel_down_sample(voxel_size)
+
+            print("after downsample:", np.asarray(pc_fixed_down.points).shape, np.asarray(pc_moving_down.points).shape)
+
+            radius_normal = voxel_size * 2
+            pc_fixed_down.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+            )
+            print('fixed normal ready')
+
+            pc_moving_down.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+            )
+            print('moving normal ready')
+
+            radius_feature = voxel_size * 5 
+            fixed_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+                pc_fixed_down,
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
+            )
+
+            print('fixed fpfh ready')
+            moving_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+                pc_moving_down,
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
+            )
+            print('moving fpfh reayd')
+
+            threshold = thresholder.apply_thresholder(fixed_subset, moving_subset)
+            print(f'{threshold=}')
+            reg_fgr = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
+                pc_moving_down,
+                pc_fixed_down,
+                moving_fpfh,
+                fixed_fpfh,
+                o3d.pipelines.registration.FastGlobalRegistrationOption(
+                maximum_correspondence_distance=threshold
+                )
+            )
+            print('fgr ready')
+
+            aligned = apply_transform(moving_pts, reg_fgr.transformation)
+
+            return aligned
+
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            moving = np.asarray(pc)
+            print(f"[INFO FGR] Optimizing image {i}")
+            optimized_moving = optimize(fixed, moving)
+            fixed = np.vstack([fixed, optimized_moving])
+
+        if bplt:
+            show_point_cloud([fixed])
+
+        return fixed

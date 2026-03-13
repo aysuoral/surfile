@@ -5,3 +5,5 @@
 /pyDoc/
 /scripts/
 /surfile/__pycache__/
+ScreenCamera*
+ScreenCapture*
