@@ -163,8 +163,6 @@ def pcd_to_o3d_pcd(pcd: np.ndarray) -> o3d.geometry.PointCloud:
     
     return pc
 
-
-
 class TransformParams:
     rx: float
     ry: float
@@ -188,7 +186,7 @@ class TransformParams:
         instance = cls()
         instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = params
         return instance
-    
+
     @classmethod
     def from_tuples(cls, rot: R, trasl: np.ndarray):
         instance = cls()
@@ -226,24 +224,26 @@ class TransformParams:
         return f"TransformParams: {self.get_matrix()}"
 
 @ensure_numpy_pcd
-def apply_transform(points: np.ndarray, params: TransformParams, params0: TransformParams=None):
+def apply_transform(points: np.ndarray, params: TransformParams | np.ndarray, params0: TransformParams | np.ndarray=None):
     """
     Applies a transformation on the points, if params0 is provided
     performs the transformation relative to the 0 transformation
     """
-    T = params.get_matrix()
+    if hasattr(params, 'get_matrix'):
+        T = params.get_matrix()
+    else: T = params
     
     if params0 is not None:
-        # perform a relative transform
-        T0 = params0.get_matrix()
+        if hasattr(params0, 'get_matrix'):
+            T0 = params0.get_matrix()
+        else: T0 = params0
+
         T0_inv = np.linalg.inv(T0)
         
         T = T0_inv @ T
         
     pts_h = np.hstack([points, np.ones((points.shape[0], 1))])
     return (T @ pts_h.T).T[:, :3]
-
-
 
 @ensure_o3d_pc
 def remove_outliers_from_point_cloud(point_cloud: o3d.geometry.PointCloud) -> np.ndarray:
@@ -292,57 +292,119 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
 
     return point_clouds
 
-def isolate_common_points_geometrical(fixed_pts, moving_pts, stitchprc=80, bplt=False):
-    fixed_center = np.mean(fixed_pts, axis=0)
-    moving_center = np.mean(moving_pts, axis=0)
+class Isolator():
+    geometrical: str = 'geometrical'
+    maxmin: str = 'maxmin'
 
-    # direzione movimento
-    moving_dir = moving_center - fixed_center
-    norm = np.linalg.norm(moving_dir)
-    if norm == 0:
-        moving_dir = np.array([1.0, 0.0, 0.0])
-    else:
-        moving_dir /= norm
+    type: str
 
-    # filtra punti entro stitchprc
-    dist_fixed = (fixed_pts - fixed_center) @ moving_dir
-    fixed_subset = fixed_pts[dist_fixed >= norm * (1 - stitchprc / 100)]
+    def __init__(self, type: str, stitchprc=80):
+        self.type = type
+        self.stitchprc = stitchprc
+
+    def apply_isolator(self, fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+        if self.type == 'geometrical': return self.isolate_common_points_geometrical(fixed_pts, moving_pts, self.stitchprc, bplt)
+        elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, bplt)
+        else:
+            raise ValueError('Unknown isolator type')
     
-    dist_moving = (moving_pts - moving_center) @ moving_dir
-    moving_subset = moving_pts[norm * (1 - stitchprc / 100) <= -dist_moving]
+    @staticmethod
+    def plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts): 
+        show_point_cloud([fixed_subset, moving_subset, fixed_pts, moving_pts], uniform_colors=True)
 
-    if bplt:
-        show_point_cloud([
-            fixed_subset, 
-            moving_subset, 
-            fixed_pts,
-            moving_pts
-            ], uniform_colors=True)
+    @staticmethod
+    def isolate_common_points_geometrical(fixed_pts: np.ndarray, moving_pts: np.ndarray, stitchprc=80, bplt=False):
+        fixed_center = np.mean(fixed_pts, axis=0)
+        moving_center = np.mean(moving_pts, axis=0)
+
+        # direzione movimento
+        moving_dir = moving_center - fixed_center
+        norm = np.linalg.norm(moving_dir)
+        if norm == 0:
+            moving_dir = np.array([1.0, 0.0, 0.0])
+        else:
+            moving_dir /= norm
+
+        # filtra punti entro stitchprc
+        dist_fixed = (fixed_pts - fixed_center) @ moving_dir
+        fixed_subset = fixed_pts[dist_fixed >= norm * (1 - stitchprc / 100)]
+        
+        dist_moving = (moving_pts - moving_center) @ moving_dir
+        moving_subset = moving_pts[norm * (1 - stitchprc / 100) <= -dist_moving]
+
+        if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
+        
+        return fixed_subset, moving_subset
+
+    @staticmethod
+    def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+        x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
+
+        make_mask = lambda pts: (
+            (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
+            (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
+            (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
+        )
+
+        fixed_subset = fixed_pts[make_mask(fixed_pts)]
+        moving_subset = moving_pts[make_mask(moving_pts)]
+
+        if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
+
+        return fixed_subset, moving_subset
+
+class Thresholder():
+    type: str
+
+    value: str = 'value'
+    sphere: str = 'sphere'
+    cuboid: str = 'cuboid'
+    KDTree: str = 'KDTree'
+
+    def __init__(self, type: str, val=20, threshold_expansion=1.2):
+        self.type = type
+        self.threshold_expansion = threshold_expansion
+        self.val = val
+
+    def apply_thresholder(self, fixed_subset, moving_subset):
+        if self.type == 'value': return self.threshold_value(self.val)
+        elif self.type == 'sphere': return self.threshold_sphere(fixed_subset, moving_subset)
+        elif self.type == 'cuboid': return self.threshold_cuboid(fixed_subset, moving_subset, self.threshold_expansion)
+        elif self.type == 'KDTree': return self.threshold_KDTree(fixed_subset, moving_subset, self.threshold_expansion)
+        else:
+            raise ValueError('Unknown thresholder type')
     
-    return fixed_subset, moving_subset
+    @staticmethod    
+    def threshold_value(x): return x
+    
+    @staticmethod
+    def threshold_sphere(fixed_subset, moving_subset):
+        c_fixed = np.mean(fixed_subset, axis=0)
+        c_moving = np.mean(moving_subset, axis=0)
 
-def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
-    x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
+        r_fixed = ...
+        r_moving = ...
+    
+    @staticmethod
+    def threshold_cuboid(fixed_subset, moving_subset, threshold_expansion=3):
+        x_mM, y_mM, z_mM = get_common_boundries(fixed_subset, moving_subset)
 
-    make_mask = lambda pts: (
-        (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
-        (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
-        (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
-    )
+        x_overlap = max(0, x_mM[1] - x_mM[0])
+        y_overlap = max(0, y_mM[1] - y_mM[0])
+        z_overlap = max(0, z_mM[1] - z_mM[0])
 
-    fixed_subset = fixed_pts[make_mask(fixed_pts)]
-    moving_subset = moving_pts[make_mask(moving_pts)]
+        volume = x_overlap * y_overlap * z_overlap
+        threshold = threshold_expansion * (volume ** (1/3))
 
-    if bplt:
-        show_point_cloud([
-            fixed_subset, 
-            moving_subset, 
-            fixed_pts,
-            moving_pts
-            ], uniform_colors=True)
+        return threshold
+    
+    @staticmethod
+    def threshold_KDTree(fixed_subset, moving_subset, threshold_expansion=1.2):
+        diffs = KDTree_mutual_diffs(fixed_subset, moving_subset)
+        threshold = np.mean(np.abs(diffs))
+        threshold_dev = np.std(np.abs(diffs))
 
-    return fixed_subset, moving_subset
-
+        return threshold * threshold_expansion
 
 def get_common_boundries(pts_a, pts_b):
     min_a = np.min(pts_a, axis=0)
@@ -357,7 +419,7 @@ def get_common_boundries(pts_a, pts_b):
 
     return x_common, y_common, z_common
 
-def mutual_points_RMSE(fixed_points, moving_points):
+def KDTree_mutual_diffs(fixed_points, moving_points):
     fixed_tree = cKDTree(fixed_points)
     moving_tree = cKDTree(moving_points)
 
@@ -369,10 +431,7 @@ def mutual_points_RMSE(fixed_points, moving_points):
         return float('inf')
     
     diffs = fixed_points[mask] - moving_points[idx_f2m[mask]]
-    rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
-    return rmse
-
-
+    return diffs
 
 def _composeFigure(left, right, T, R=None, support=None, sp=20):
     """
@@ -424,6 +483,62 @@ def _composeFigure(left, right, T, R=None, support=None, sp=20):
     fig2, cx = plt.subplots(nrows=1, ncols=1)
     cx.imshow(st, cmap=cm.viridis)
     plt.show()
+
+@ensure_numpy_pcd
+def rescale_point_cloud(point_clouds: list[np.ndarray], scales=None, revert=False):
+    """
+    Rescale a list of point clouds along x, y, and z axes.
+
+    If `scales` is not provided, the scale factors are computed from the
+    first point cloud in the list as:
+
+        scales = maxs - mins
+
+    where `mins` and `maxs` are the per-axis minimum and maximum values of
+    the reference point cloud. The same scale factors are then applied to
+    all point clouds in the list.
+
+    If `revert` is True, the inverse scaling is applied by using `1 / scales`.
+
+    Parameters
+    ----------
+    point_clouds : list[np.ndarray]
+        List of point clouds, each of shape (N, 3).
+    scales : np.ndarray or None, optional
+        Array of shape (3,) containing the scale factors for x, y, and z.
+        If None, the factors are computed from the first point cloud.
+    revert : bool, optional
+        If True, apply the inverse scaling factors instead of the direct
+        scaling factors. Default is False.
+
+    Returns
+    -------
+    scaled_list : list[np.ndarray]
+        List of rescaled point clouds.
+    scales : np.ndarray
+        The scale factors that were used.
+
+    Notes
+    -----
+    This function only divides coordinates by the scale factors.
+    It does not shift the point clouds by subtracting their minimum values.
+    Therefore, the output is not guaranteed to lie in the [0, 1] range.
+    """
+    if scales is None:
+        ref = point_clouds[0]
+
+        mins = ref.min(axis=0)
+        maxs = ref.max(axis=0)
+        scales = maxs - mins
+
+    scaled_list = []
+    scales = 1 / scales if revert else scales
+
+    for pts in point_clouds:
+        pts_scaled = pts / scales
+        scaled_list.append(pts_scaled)
+
+    return scaled_list, scales
 
 class SurfaceStitcher:
     @staticmethod
@@ -530,168 +645,6 @@ class SurfaceStitcher:
                            sp=stitchPrc)
 
     @staticmethod
-    def stitchFGR(surl, surr, stitchPrc=20):
-        """
-        Finds the best allignment between surl and surr
-        by first registering approximatively the 2 images
-        using a FGR feature matcher, and then improves
-        the result by refining with an ICP (iterative closest point)
-        registration
-
-        ref: http://www.open3d.org/docs/0.9.0/python_api/open3d.registration.html
-        FGR: http://vladlen.info/papers/fast-global-registration.pdf
-        ICP: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=121791
-        PFH: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=5152473
-
-        Parameters
-        ----------
-        surl : surface.Surface
-            The left image to be stitched
-        surr : surface.Surface
-            The right image to be stitched
-        stitchPrc : int
-            the percentage of the image overlapping
-        """
-        if surl.Z.shape != surr.Z.shape:
-            raise ValueError("[ERROR FGR] surl and surr must have the same shape for FGR stitching")
-
-        len = int(surl.Z.shape[1] * stitchPrc / 100)
-        
-        # find the interested zones to be stitched
-        lZone = copy.deepcopy(surl.Z[:, -len:])
-        rZone = copy.deepcopy(surr.Z[:, :len])
-        
-        print(f'[INFO FGR] {lZone.shape=}, {rZone.shape=}')
-
-        # scale parameter for normalization
-        scale = 1
-
-        scalez = np.max([lZone.max(), rZone.max()]) * 2 * scale  # re-range [-scale * 0.5, scale * 0.5]
-        lZone /= scalez
-        rZone /= scalez
-
-        # scale xy max dimention
-        if lZone.shape[1] > lZone.shape[0]:
-            scaley = lZone.shape[0] * scale / lZone.shape[1]
-            scalefactor = lZone.shape[1]
-
-            X = np.linspace(0, scale, lZone.shape[1])
-            Y = np.linspace(0, scaley, lZone.shape[0])
-        else:
-            scalex = lZone.shape[1] * scale / lZone.shape[0]
-            scalefactor = lZone.shape[0]
-
-            X = np.linspace(0, scalex, lZone.shape[1])
-            Y = np.linspace(0, scale, lZone.shape[0])
-        mesh_x, mesh_y = np.meshgrid(X, Y)
-
-        def toPC(zone):
-            xyz = np.zeros((np.size(mesh_x), 3))
-            xyz[:, 0] = np.reshape(mesh_x, -1)
-            xyz[:, 1] = np.reshape(mesh_y, -1)
-            xyz[:, 2] = np.reshape(zone, -1)
-
-            # Pass xyz to Open3D.o3d.geometry.PointCloud and visualize
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(xyz)
-
-            return pcd
-
-        pcd_l = toPC(lZone)
-        pcd_r = toPC(rZone)
-        
-        print(pcd_l)
-        
-        # exit()
-
-        def draw_registration_result(source, target, transformation):
-            source_temp = copy.deepcopy(source)
-            target_temp = copy.deepcopy(target)
-            source_temp.paint_uniform_color(np.array([139, 0, 0]) / 255)
-            target_temp.paint_uniform_color(np.array([0, 0, 139]) / 255)
-            source_temp.transform(transformation)
-            o3d.visualization.draw_geometries([source_temp, target_temp])
-
-        def preprocess_point_cloud(pcd, voxel_size):
-            print("[INFO FGR] Downsample with a voxel size %.3f." % voxel_size)
-            pcd_down = pcd.voxel_down_sample(voxel_size)
-
-            radius_normal = voxel_size * 2
-            print("[INFO FGR] Estimate normal with search radius %.3f." % radius_normal)
-            pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
-
-            radius_feature = voxel_size * 5
-            print("[INFO FGR] Compute FPFH feature with search radius %.3f." % radius_feature)
-            pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-                pcd_down,
-                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
-            )
-            return pcd_down, pcd_fpfh
-
-        def prepare_dataset(voxel_size):
-            source = pcd_l
-            target = pcd_r
-
-            source_down, source_fpfh = preprocess_point_cloud(source, voxel_size)
-            target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
-            
-            # o3d.visualization.draw_geometries([source_down])
-            # o3d.visualization.draw_geometries([target_down])
-            
-            return source, target, source_down, target_down, source_fpfh, target_fpfh
-
-        def execute_global_registration(source_down, target_down, source_fpfh,
-                                        target_fpfh, voxel_size):
-            distance_threshold = voxel_size * 0.5
-            print("[INFO FGR] FGR registration on downsampled point clouds.")
-            print("[INFO FGR] downsampling voxel size is %.3f," % voxel_size)
-            print("[INFO FGR] distance threshold %.3f." % distance_threshold)
-            result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
-                source_down, target_down, source_fpfh, target_fpfh,
-                o3d.pipelines.registration.FastGlobalRegistrationOption(
-                    maximum_correspondence_distance=distance_threshold)
-            )
-            return result
-
-        voxel_size = 0.02 * scale
-        source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size)
-
-        result_fgr = execute_global_registration(source_down, target_down,
-                                                 source_fpfh, target_fpfh,
-                                                 voxel_size)
-        print(result_fgr)
-        print("[INFO FGR] Transformation is:")
-        print(result_fgr.transformation)
-        draw_registration_result(source_down, target_down, result_fgr.transformation)
-
-        print("[INFO FGR] Refine with point-to-point ICP")
-        # actually FGR should not need this step
-        distance_threshold = 0.001 * scale
-        reg_p2p = o3d.pipelines.registration.registration_icp(
-            source, target, distance_threshold,
-            init=result_fgr.transformation,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(True))
-        print(reg_p2p)
-        print("[INFO FGR] Transformation is:")
-        print(reg_p2p.transformation)
-        draw_registration_result(source, target, reg_p2p.transformation)
-
-        # Transformation matrix in the form:
-        # [[ 1 , -si, +be, xt],
-        #  [+si,  1 , -al, yt],
-        #  [-be, +al,  1 , zt],
-        #  [ 0 ,  0 ,  0 ,  1]]
-
-        xtransl = int(reg_p2p.transformation[0, 3] * scalefactor)
-        ytransl = int(reg_p2p.transformation[1, 3] * scalefactor)
-        ztransl = reg_p2p.transformation[2, 3] * scalez
-        _composeFigure(surl.Z, surr.Z,
-                       T=[xtransl, ytransl, 'best'],
-                       # R=reg_p2p.transformation[0:3, 0:3],  # this doesn't seem right
-                       # support=(surl.X, surl.Y),
-                       sp=stitchPrc)
-
-    @staticmethod
     @ensure_numpy_pcd
     def stitchRobot(point_clouds: list[np.ndarray], robotTfile, bplt=False):
         """
@@ -733,26 +686,35 @@ class SurfaceStitcher:
         return fixed_ref, point_clouds_T
 
     @staticmethod
-    def stitchRMSE(point_clouds_T, n_calls, isolator, bplt=False):
-        def hard_rmse(fixed_pts, moving_pts):
-            fixed_subset, moving_subset = isolator(fixed_pts, moving_pts)
+    @ensure_numpy_pcd
+    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator: Isolator, bplt=False):
+        """
+        Finds the best alignment between transformed point clouds
+        by minimizing the RMSE between mutually matched points
+        in the overlapping regions.
 
-            fixed_tree = cKDTree(fixed_subset)
-            moving_tree = cKDTree(moving_subset)
+        Parameters
+        ----------
+        point_clouds_T : list[np.ndarray]
+            List of transformed point clouds, in the order they
+            will be stitched together
+        n_calls : int
+            Number of optimization calls used by gp_minimize
+            during the RMSE minimization
+        isolator : callable
+            Function that takes fixed_pts and moving_pts and returns
+            the overlapping subsets to be compared
+        bplt : bool
+            If true plots the RMSE and number of matched points
+            during each optimization, and shows the final stitched
+            point cloud
 
-            dist_f2m, idx_f2m = moving_tree.query(fixed_subset, k=1, workers= -1)
-            dist_m2f, idx_m2f = fixed_tree.query(moving_subset, k=1, workers= -1)
-
-            mask = (np.arange(len(fixed_subset)) == idx_m2f[idx_f2m])
-            if not np.any(mask):
-                return float('inf')
-
-            diffs = fixed_subset[mask] - moving_subset[idx_f2m[mask]]
-            rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
-            npoints.append(len(diffs))
-            rmses.append(rmse)
-            return rmse
-
+        Returns
+        -------
+        fixed_pc : np.ndarray
+            The final stitched point cloud after sequentially
+            aligning and merging all point clouds
+        """
         def optimize(fixed_pts, moving_pts):
             U_tx, U_ty, U_tz = 55.2, 60.6, 69.3  
             U_theta = 0.5  
@@ -763,8 +725,14 @@ class SurfaceStitcher:
             def objective(x):
                 p = TransformParams.from_list(x)
                 moved = apply_transform(moving_pts, p)
+
+                fixed_sub, moved_sub = isolator.apply_isolator(fixed_pts, moved, bplt=False)
+                diffs = KDTree_mutual_diffs(fixed_sub, moved_sub)
+                rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
                 
-                return hard_rmse(fixed_pts, moved)
+                npoints.append(len(diffs))
+                rmses.append(rmse)
+                return rmse
 
             space = [
                 Real(t0[0] - U_tx, t0[0] + U_tx),
@@ -816,3 +784,159 @@ class SurfaceStitcher:
             show_point_cloud([fixed_pc])
 
         return fixed_pc
+    
+    @staticmethod
+    @ensure_numpy_pcd
+    def stitchICP(point_clouds_T: list[np.ndarray], thresholder: Thresholder, isolator: None | Isolator, bplt=False):
+        """
+        Refines the alignment of transformed point clouds using ICP.
+
+        The first point cloud is taken as the fixed reference. Each subsequent
+        point cloud is aligned to the accumulated fixed point cloud by using
+        Iterative Closest Point (ICP), then merged into the final stitched
+        result. If an isolator function is provided, ICP is applied only on the
+        isolated overlapping regions, while the resulting transformation is
+        applied to the full moving point cloud.
+
+        Parameters
+        ----------
+        point_clouds_T : list[np.ndarray]
+            List of transformed point clouds to be stitched, in the order they
+            were acquired. Each point cloud is expected to be an array of shape
+            (N, 3).
+        threshold : float
+            Maximum correspondence distance used by ICP.
+        isolator : callable, optional
+            Function that takes ``fixed_pts`` and ``moving_pts`` as input and
+            returns ``fixed_subset, moving_subset`` to restrict ICP to a common
+            region. If None, ICP is applied to the full point clouds.
+        bplt : bool, optional
+            If True, displays the final stitched point cloud.
+
+        Returns
+        -------
+        fixed_pc : np.ndarray
+            Final stitched point cloud obtained after sequential ICP alignment
+            and merging.
+
+        Notes
+        -----
+        This method assumes that the input point clouds are already roughly
+        aligned, for example by a prior robot-based transformation. ICP is then
+        used only as a refinement step.
+        """
+        def optimize(fixed_pts, moving_pts):
+
+            if isolator != None:
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts)
+            else:
+                fixed_subset, moving_subset = fixed_pts, moving_pts
+
+            pc_fixed = pcd_to_o3d_pcd(fixed_subset)
+            pc_moving = pcd_to_o3d_pcd(moving_subset)
+
+            trans_init = np.eye(4)
+            threshold = thresholder.apply_thresholder(fixed_subset, moving_subset)
+            print(f'{threshold=}')
+
+            reg_p2p = o3d.pipelines.registration.registration_icp(
+                pc_moving, pc_fixed, threshold, trans_init,
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=1000))
+            
+            aligned = apply_transform(moving_pts, reg_p2p.transformation)
+
+            return aligned, reg_p2p
+        
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            moving = np.asarray(pc)
+
+            print(f"[INFO ICP] Optimizing image {i}")
+
+            optimized_moving, _ = optimize(fixed, moving)
+
+            fixed = np.vstack([fixed, optimized_moving])
+
+        fixed_pc = fixed
+
+        if bplt:
+            show_point_cloud([fixed_pc])
+
+        return fixed_pc
+
+    @staticmethod
+    @ensure_numpy_pcd
+    def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, bplt=False):
+
+        def optimize(fixed_pts, moving_pts):
+
+            if isolator != None:
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts)
+            else:
+                fixed_subset, moving_subset = fixed_pts, moving_pts
+
+            pc_fixed = pcd_to_o3d_pcd(fixed_subset)
+            pc_moving = pcd_to_o3d_pcd(moving_subset)
+
+            print("before downsample:", np.asarray(pc_fixed.points).shape, np.asarray(pc_moving.points).shape)
+
+            pc_fixed_down = pc_fixed.voxel_down_sample(voxel_size)
+            pc_moving_down = pc_moving.voxel_down_sample(voxel_size)
+
+            print("after downsample:", np.asarray(pc_fixed_down.points).shape, np.asarray(pc_moving_down.points).shape)
+
+            radius_normal = voxel_size * 2
+            pc_fixed_down.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+            )
+            print('fixed normal ready')
+
+            pc_moving_down.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
+            )
+            print('moving normal ready')
+
+            radius_feature = voxel_size * 5 
+            fixed_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+                pc_fixed_down,
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
+            )
+
+            print('fixed fpfh ready')
+            moving_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+                pc_moving_down,
+                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
+            )
+            print('moving fpfh reayd')
+
+            threshold = thresholder.apply_thresholder(fixed_subset, moving_subset)
+            print(f'{threshold=}')
+            reg_fgr = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
+                pc_moving_down,
+                pc_fixed_down,
+                moving_fpfh,
+                fixed_fpfh,
+                o3d.pipelines.registration.FastGlobalRegistrationOption(
+                maximum_correspondence_distance=threshold
+                )
+            )
+            print('fgr ready')
+
+            aligned = apply_transform(moving_pts, reg_fgr.transformation)
+
+            return aligned
+
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            moving = np.asarray(pc)
+            print(f"[INFO FGR] Optimizing image {i}")
+            optimized_moving = optimize(fixed, moving)
+            fixed = np.vstack([fixed, optimized_moving])
+
+        if bplt:
+            show_point_cloud([fixed])
+
+        return fixed
