@@ -295,16 +295,20 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
 class Isolator():
     geometrical: str = 'geometrical'
     maxmin: str = 'maxmin'
+    KDTree: str = 'KDTree'
 
     type: str
 
-    def __init__(self, type: str, stitchprc=80):
+    def __init__(self, type: str, stitchprc=80, max_distance=None):
         self.type = type
         self.stitchprc = stitchprc
+        self.max_distance = max_distance
 
     def apply_isolator(self, fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
         if self.type == 'geometrical': return self.isolate_common_points_geometrical(fixed_pts, moving_pts, self.stitchprc, bplt)
         elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, bplt)
+        elif self.type == 'KDTree': return self.isolate_common_points_kdtree(fixed_pts, moving_pts, self.max_distance, bplt)
+
         else:
             raise ValueError('Unknown isolator type')
     
@@ -352,6 +356,42 @@ class Isolator():
         if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
 
         return fixed_subset, moving_subset
+    
+    @staticmethod
+    def isolate_common_points_kdtree(fixed_pts: np.ndarray, moving_pts: np.ndarray, max_distance: float=None, bplt=False):
+        A_to_B = lambda A, B: cKDTree(B).query(A, k=1)
+
+        dist_f2m, _ = A_to_B(fixed_pts, moving_pts)
+        dist_m2f, _ = A_to_B(moving_pts, fixed_pts)
+
+        if max_distance is None:
+            dist_hist, dist_bins = np.histogram(np.hstack((dist_f2m, dist_m2f)), 50)
+
+            max_hist_dist = dist_bins[np.nanargmax(dist_hist)]
+            max_distance = max_hist_dist * 1.1
+
+        fixed_subset = fixed_pts[dist_f2m <= max_distance]
+        moving_subset = moving_pts[dist_m2f <= max_distance]
+
+        ax = None
+
+        if bplt:
+            Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
+
+            fig, ax = plt.subplots()
+
+            ax.hist(dist_f2m, bins=50, alpha=0.5, label="fixed → moving")
+            ax.hist(dist_m2f, bins=50, alpha=0.5, label="moving → fixed")
+
+            ax.hist(np.hstack((dist_f2m, dist_m2f)), bins=50, alpha=0.5, label="all")
+            ax.vlines([max_distance], 0, np.nanmax(dist_hist), label='max distance')
+
+            ax.set_xlabel("Distance")
+            ax.set_ylabel("Count")
+
+            plt.show()
+
+        return fixed_subset, moving_subset, ax
 
 class Thresholder():
     type: str
@@ -871,11 +911,12 @@ class SurfaceStitcher:
     def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
+            [fixed_scaled, moving_scaled], scales = rescale_point_cloud([fixed_pts, moving_pts])
 
             if isolator != None:
-                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts)
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_scaled, moving_scaled, bplt=bplt)
             else:
-                fixed_subset, moving_subset = fixed_pts, moving_pts
+                fixed_subset, moving_subset = fixed_scaled, moving_scaled
 
             pc_fixed = pcd_to_o3d_pcd(fixed_subset)
             pc_moving = pcd_to_o3d_pcd(moving_subset)
@@ -924,7 +965,13 @@ class SurfaceStitcher:
             )
             print('fgr ready')
 
-            aligned = apply_transform(moving_pts, reg_fgr.transformation)
+            aligned_scaled = apply_transform(moving_scaled, reg_fgr.transformation)  #or moving_scaled
+
+            [aligned], _ = rescale_point_cloud(
+                [aligned_scaled],
+                scales=scales,
+                revert=True
+            )
 
             return aligned
 

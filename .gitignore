@@ -7,3 +7,5 @@
 /surfile/__pycache__/
 ScreenCamera*
 ScreenCapture*
+DepthCamera*
+DepthCapture*
