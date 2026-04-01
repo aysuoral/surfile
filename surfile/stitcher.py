@@ -83,7 +83,7 @@ def ensure_o3d_pc(func):
     return wrapper
 
 @ensure_numpy_pcd
-def pcd_to_surface(pcd: np.ndarray, dx, dy, bplt=False) -> surface.Surface:
+def pcd_to_surface(pcds: list[np.ndarray], dx, dy, force_same_size=True, bplt=False) -> surface.Surface:
     """
     Transforms pc into a Surface object.
     
@@ -91,70 +91,98 @@ def pcd_to_surface(pcd: np.ndarray, dx, dy, bplt=False) -> surface.Surface:
     2. Projects points onto the plane coordinate system.
     3. Interpolates onto a regular grid defined by dx, dy.
     """
-    points = pcd
+    
+    z_maps = []
 
-    # Plane equation: ax + by + d = z  => [x, y, 1][a, b, d]^T = z
-    A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
-    C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
-    a, b, d = C 
-    
-    normal = np.array([-a, -b, 1.0])
-    normal /= np.linalg.norm(normal)
-    
-    z_axis = np.array([0, 0, 1])
-    v = np.cross(normal, z_axis)
-    c = np.dot(normal, z_axis)
-    s = np.linalg.norm(v)
-    
-    if s < 1e-9:  # Already aligned
-        R = np.eye(3)
-    else:
-        kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-        R = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
-    
-    centroid = np.mean(points, axis=0)
-    centered_pts = points - centroid
-    rotated_pts = centered_pts @ R.T
-    
-    x_pts = rotated_pts[:, 0]
-    y_pts = rotated_pts[:, 1]
-    z_pts = rotated_pts[:, 2] # These are now distances from the plane
-    
-    x_min, x_max = x_pts.min(), x_pts.max()
-    y_min, y_max = y_pts.min(), y_pts.max()
-    n_x = int(np.ceil((x_max - x_min) / dx))
-    n_y = int(np.ceil((y_max - y_min) / dy))
-    grid_x = np.linspace(x_min, x_min + n_x * dx, n_x)
-    grid_y = np.linspace(y_min, y_min + n_y * dy, n_y)
-    gx, gy = np.meshgrid(grid_x, grid_y)
-    
-    z_sum, _, _ = np.histogram2d(x_pts, y_pts, bins=[grid_x, grid_y], weights=z_pts)
-    
-    # 3. Calculate the count of points in each bin
-    counts, _, _ = np.histogram2d(x_pts, y_pts, bins=[grid_x, grid_y])
-            
-    # Average the bins and fill NaNs
-    z_sum = np.divide(z_sum, counts, out=np.zeros_like(z_sum), where=counts!=0)
-    mean_val = np.nanmean(z_pts)
-    z_sum[counts == 0] = mean_val
-    
-    print(f'[INFO PCD_TO_SUR] Could not bin {z_sum[counts == 0].size} elements')
+    for pcd in pcds:
+        points = pcd
 
-    # Create the coordinate map (the "query" points in index space)
-    # Since gx and gy are already spaced by dx/dy, their index-space is just a ramp
-    coords = np.array([
-        (gy - y_min) / dy, 
-        (gx - x_min) / dx
-    ])
-    
-    print(f'[INFO PCD_TO_SUR] Converting pc using spacings dx: {dx:.3f} um, dy: {dy:.3f} um')
-    # order=3 is equivalent to cubic interpolation
-    z_map = ndimage.map_coordinates(z_sum, coords, order=1, mode='nearest')
-    
-    surf = surface.Surface()
-    surf.setValues(dx, dy, z_map, bplt=bplt)
-    
-    return surf
+        # Plane equation: ax + by + d = z  => [x, y, 1][a, b, d]^T = z
+        A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+        C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
+        a, b, d = C 
+        
+        normal = np.array([-a, -b, 1.0])
+        normal /= np.linalg.norm(normal)
+        
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(normal, z_axis)
+        c = np.dot(normal, z_axis)
+        s = np.linalg.norm(v)
+        
+        if True:  # Already aligned
+            R = np.eye(3)
+        else:
+            kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+            R = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+        
+        centroid = np.mean(points, axis=0)
+        centered_pts = points - centroid
+        rotated_pts = centered_pts @ R.T
+        
+        x_pts = rotated_pts[:, 0]
+        y_pts = rotated_pts[:, 1]
+        z_pts = rotated_pts[:, 2] # These are now distances from the plane
+        
+        x_min, x_max = x_pts.min(), x_pts.max()
+        y_min, y_max = y_pts.min(), y_pts.max()
+        n_x = int(np.ceil((x_max - x_min) / dx))
+        n_y = int(np.ceil((y_max - y_min) / dy))
+        grid_x = np.linspace(x_min, x_min + n_x * dx, n_x)
+        grid_y = np.linspace(y_min, y_min + n_y * dy, n_y)
+        gx, gy = np.meshgrid(grid_x, grid_y)
+
+        print("\n--- GRID INFO ---")
+        print(f"x_min: {x_min:.3f}, x_max: {x_max:.3f}, range: {x_max - x_min:.3f}")
+        print(f"y_min: {y_min:.3f}, y_max: {y_max:.3f}, range: {y_max - y_min:.3f}")
+
+        print(f"n_x: {n_x}, n_y: {n_y}")
+        print(f"dx: {dx}, dy: {dy}")
+
+        print(f"grid_x shape: {grid_x.shape}, grid_y shape: {grid_y.shape}")
+        print(f"meshgrid shape: gx: {gx.shape}, gy: {gy.shape}")
+        print("------------------\n")
+        
+        z_sum, _, _ = np.histogram2d(y_pts, x_pts, bins=[grid_y, grid_x], weights=z_pts)
+        
+        # 3. Calculate the count of points in each bin
+        counts, _, _ = np.histogram2d(y_pts, x_pts, bins=[grid_y, grid_x])
+                
+        # Average the bins and fill NaNs
+        z_sum = np.divide(z_sum, counts, out=np.zeros_like(z_sum), where=counts!=0)
+        mean_val = np.nanmean(z_pts)
+        z_sum[counts == 0] = mean_val
+        
+        print(f'[INFO PCD_TO_SUR] Could not bin {z_sum[counts == 0].size} elements')
+
+        # Create the coordinate map (the "query" points in index space)
+        # Since gx and gy are already spaced by dx/dy, their index-space is just a ramp
+        coords = np.array([
+            (gy - y_min) / dy, 
+            (gx - x_min) / dx
+        ])
+        
+        print(f'[INFO PCD_TO_SUR] Converting pc using spacings dx: {dx:.3f} um, dy: {dy:.3f} um')
+        # order=3 is equivalent to cubic interpolation
+        z_map = ndimage.map_coordinates(z_sum, coords, order=1, mode='nearest')
+
+        z_maps.append(z_map)
+
+    if force_same_size == True:
+        min_rows = min(z_map.shape[0] for z_map in z_maps)
+        min_cols = min(z_map.shape[1] for z_map in z_maps)
+
+        for i in range(len(z_maps)):
+            z_maps[i] = z_maps[i][:min_rows, :min_cols]
+
+    surfs = []
+
+    for z_map in z_maps:
+        surf = surface.Surface()
+        surf.setValues(dx, dy, z_map, bplt=bplt)
+        surfs.append(surf)
+
+    return surfs
 
 @ensure_numpy_pcd
 def pcd_to_o3d_pcd(pcd: np.ndarray) -> o3d.geometry.PointCloud:
@@ -299,14 +327,15 @@ class Isolator():
 
     type: str
 
-    def __init__(self, type: str, stitchprc=80, max_distance=None):
+    def __init__(self, type: str, stitchprc=80, max_distance=None, force_same_size=(True, 1, 1)):
         self.type = type
         self.stitchprc = stitchprc
         self.max_distance = max_distance
+        self.force_same_size = force_same_size
 
     def apply_isolator(self, fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
         if self.type == 'geometrical': return self.isolate_common_points_geometrical(fixed_pts, moving_pts, self.stitchprc, bplt)
-        elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, bplt)
+        elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, self.force_same_size, bplt)
         elif self.type == 'KDTree': return self.isolate_common_points_kdtree(fixed_pts, moving_pts, self.max_distance, bplt)
 
         else:
@@ -314,7 +343,7 @@ class Isolator():
     
     @staticmethod
     def plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts): 
-        show_point_cloud([fixed_subset, moving_subset, fixed_pts, moving_pts], uniform_colors=True)
+        show_point_cloud([fixed_subset, moving_subset], uniform_colors=True)
 
     @staticmethod
     def isolate_common_points_geometrical(fixed_pts: np.ndarray, moving_pts: np.ndarray, stitchprc=80, bplt=False):
@@ -341,7 +370,7 @@ class Isolator():
         return fixed_subset, moving_subset
 
     @staticmethod
-    def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, bplt=False):
+    def isolate_common_points_max_min(fixed_pts: np.ndarray, moving_pts: np.ndarray, force_same_size, bplt=False):
         x_mM, y_mM, z_mM = get_common_boundries(fixed_pts, moving_pts)
 
         make_mask = lambda pts: (
@@ -351,8 +380,21 @@ class Isolator():
         )
 
         fixed_subset = fixed_pts[make_mask(fixed_pts)]
-        moving_subset = moving_pts[make_mask(moving_pts)]
+        moving_subset = moving_pts[make_mask(moving_pts)] 
 
+        force, dx, dy = force_same_size
+
+        if force == True:
+            x0 = x_mM[0]
+            y0 = y_mM[0]
+
+            print('ffxfxfx', ((fixed_subset[:, 0] - x0) / dx).astype(int))
+            fixed_subset[:, 0] = ((fixed_subset[:, 0] - x0) / dx).astype(int) * dx + x0
+            fixed_subset[:, 1] = ((fixed_subset[:, 1] - y0) / dy).astype(int) * dy + y0
+
+            moving_subset[:, 0] = ((moving_subset[:, 0] - x0) / dx).astype(int) * dx + x0
+            moving_subset[:, 1] = ((moving_subset[:, 1] - y0) / dy).astype(int) * dy + y0
+            
         if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
 
         return fixed_subset, moving_subset
@@ -582,7 +624,7 @@ def rescale_point_cloud(point_clouds: list[np.ndarray], scales=None, revert=Fals
 
 class SurfaceStitcher:
     @staticmethod
-    def stitchCorrelation(surl, surr, stitchPrc=20, samplingPrc=50, correlateDer=True, bplt=False):
+    def stitchCorrelation2(surl, surr, stitchPrc=20, samplingPrc=50, correlateDer=True, bplt=False):
         """
         Finds the best allignment between surl and surr
         by calculating the maximum of the cross correlation
@@ -921,23 +963,16 @@ class SurfaceStitcher:
             pc_fixed = pcd_to_o3d_pcd(fixed_subset)
             pc_moving = pcd_to_o3d_pcd(moving_subset)
 
-            print("before downsample:", np.asarray(pc_fixed.points).shape, np.asarray(pc_moving.points).shape)
-
             pc_fixed_down = pc_fixed.voxel_down_sample(voxel_size)
             pc_moving_down = pc_moving.voxel_down_sample(voxel_size)
-
-            print("after downsample:", np.asarray(pc_fixed_down.points).shape, np.asarray(pc_moving_down.points).shape)
 
             radius_normal = voxel_size * 2
             pc_fixed_down.estimate_normals(
                 o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
             )
-            print('fixed normal ready')
-
             pc_moving_down.estimate_normals(
                 o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30)
             )
-            print('moving normal ready')
 
             radius_feature = voxel_size * 5 
             fixed_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
@@ -945,12 +980,10 @@ class SurfaceStitcher:
                 o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
             )
 
-            print('fixed fpfh ready')
             moving_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
                 pc_moving_down,
                 o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
             )
-            print('moving fpfh reayd')
 
             threshold = thresholder.apply_thresholder(fixed_subset, moving_subset)
             print(f'{threshold=}')
@@ -963,9 +996,9 @@ class SurfaceStitcher:
                 maximum_correspondence_distance=threshold
                 )
             )
-            print('fgr ready')
 
-            aligned_scaled = apply_transform(moving_scaled, reg_fgr.transformation)  #or moving_scaled
+
+            aligned_scaled = apply_transform(moving_scaled, reg_fgr.transformation)  
 
             [aligned], _ = rescale_point_cloud(
                 [aligned_scaled],
@@ -981,6 +1014,146 @@ class SurfaceStitcher:
             moving = np.asarray(pc)
             print(f"[INFO FGR] Optimizing image {i}")
             optimized_moving = optimize(fixed, moving)
+            fixed = np.vstack([fixed, optimized_moving])
+
+        if bplt:
+            show_point_cloud([fixed])
+
+        return fixed
+
+    @staticmethod
+    @ensure_numpy_pcd
+    def stitchCorrelation(point_clouds_T: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, bplt=False):
+
+        def optimize(fixed_pts, moving_pts):
+
+            if isolator != None:
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts, bplt=bplt)
+            else:
+                fixed_subset, moving_subset = fixed_pts, moving_pts
+
+            fixed_surf, moving_surf = pcd_to_surface([fixed_subset, moving_subset], dx, dy, True, bplt=True)
+
+            plt.show()
+
+            print('shapes:', fixed_surf.Z.shape, moving_surf.Z.shape)
+
+            if fixed_surf.Z.shape != moving_surf.Z.shape:   
+                raise ValueError("[ERROR COR] fixed_surf and moving_surf must have the same shape.")
+
+            lzone = copy.deepcopy(fixed_surf.Z)
+            rzone = copy.deepcopy(moving_surf.Z)
+
+            print(f"[INFO COR] {lzone.shape=}, {rzone.shape=}")
+
+            if correlateDer:
+                lzone = np.diff(lzone)
+                rzone = np.diff(rzone)
+
+            center_x, center_y = lzone.shape[0] // 2, lzone.shape[1] // 2
+            size_x = lzone.shape[0] * samplingPrc // 100
+            size_y = lzone.shape[1] * samplingPrc // 100
+
+            get_sample = lambda arr: arr[
+            center_x - size_x // 2 : center_x + size_x // 2,
+            center_y - size_y // 2 : center_y + size_y // 2
+            ]
+
+            sampleL = get_sample(lzone)
+            sampleR = get_sample(rzone)
+
+            ccL = signal.correlate2d(lzone, sampleR, mode='valid')
+            ccR = signal.correlate2d(rzone, sampleL, mode='valid')
+
+            ML = np.argmax(ccL)
+            yML, xML = np.unravel_index(ML, ccL.shape)
+            print(f"[INFO COR] {ML=} {xML=} {yML=}")
+
+            MR = np.argmax(ccR)
+            yMR, xMR = np.unravel_index(MR, ccR.shape)
+            print(f"[INFO COR] {MR=} {xMR=} {yMR=}")
+
+            bestLTranslation = [ccL.shape[1] // 2 - xML, ccL.shape[0] // 2 - yML]
+            bestRTranslation = [ccR.shape[1] // 2 - xMR, ccR.shape[0] // 2 - yMR]
+
+            meanTranslation = [(bestLTranslation[i] - bestRTranslation[i]) // 2 for i in [0, 1]]
+            print(f"[INFO COR] {bestLTranslation=}")
+            print(f"[INFO COR] {bestRTranslation=}")
+            print(f"[INFO COR] {meanTranslation=}")
+
+            flippedccR = np.flip(ccR)
+            cross_cc = ccL * flippedccR
+
+            M = np.argmax(cross_cc)
+            yM, xM = np.unravel_index(M, cross_cc.shape)
+            bestMeanTranslation = [cross_cc.shape[1] // 2 - xM, cross_cc.shape[0] // 2 - yM]
+
+            print(f"[INFO COR] {M=} {xM=} {yM=}")
+            print(f"[INFO COR] {bestMeanTranslation=}")
+
+            tx = bestMeanTranslation[0] * dx
+            ty = bestMeanTranslation[1] * dy
+            # tz = np.mean(fixed_pts[:, 2]) - np.mean(moving_pts[:, 2])
+            # tz = np.mean(lzone) - np.mean(rzone)
+
+            temp = moving_pts.copy()
+            temp[:, :2] += [tx, ty]
+
+            mask_f = (fixed_pts[:, 0] >= temp[:, 0].min()) & (fixed_pts[:, 0] <= temp[:, 0].max()) & (fixed_pts[:, 1] >= temp[:, 1].min()) & (fixed_pts[:, 1] <= temp[:, 1].max())
+            mask_m = (temp[:, 0] >= fixed_pts[:, 0].min()) & (temp[:, 0] <= fixed_pts[:, 0].max()) & (temp[:, 1] >= fixed_pts[:, 1].min()) & (temp[:, 1] <= fixed_pts[:, 1].max())
+            tz = np.median(fixed_pts[mask_f, 2]) - np.median(temp[mask_m, 2])
+            # if isolator != None:
+            #     fix_sub, temp_sub = isolator.apply_isolator(fixed_pts, temp, bplt=bplt)
+
+            # tz = np.median(fix_sub[:, 2]) - np.median(temp_sub[:, 2])
+
+            aligned = moving_pts.copy()
+            aligned[:, 0] += tx
+            aligned[:, 1] += ty
+            aligned[:, 2] += tz
+
+            print(f"before mean z = {np.mean(moving_pts[:, 2])}")
+            print(f"after mean z  = {np.mean(aligned[:, 2])}")
+
+            if bplt:
+                fig, ((ax, bx, cx), (gx, ex, fx)) = plt.subplots(nrows=2, ncols=3)
+                ax.imshow(ccL)
+                ax.set_title('ccL')
+                ax.plot(xML, yML, 'ro', ms=5)
+                bx.imshow(lzone)
+                bx.set_title('lzone')
+                cx.imshow(sampleR)
+                cx.set_title('rsample')
+
+                gx.imshow(ccR)
+                gx.set_title('ccR')
+                gx.plot(xMR, yMR, 'ro', ms=5)
+                ex.imshow(rzone)
+                ex.set_title('rzone')
+                fx.imshow(sampleL)
+                fx.set_title('lsample')
+                funct.persFig([ax, bx, cx, gx, ex, fx], xlab='x [pixels]', ylab='y [pixels]', gridcol='none')
+
+                fig2, (lx, mx, nx) = plt.subplots(nrows=1, ncols=3)
+                lx.imshow(ccL)
+                lx.set_title('ccL')
+                mx.imshow(np.flip(ccR))
+                mx.set_title('ccR rot')
+                nx.imshow(ccL * np.flip(ccR))
+                nx.set_title('cc mult')
+                funct.persFig([lx, mx, nx], xlab='x [pixels]', ylab='y [pixels]', gridcol='none')
+                nx.plot(xM, yM, 'r.', ms=5)
+
+                plt.show()
+
+            return aligned, [tx, ty]
+
+        fixed = np.asarray(point_clouds_T[0])
+
+        for i, pc in enumerate(point_clouds_T[1:]):
+            moving = np.asarray(pc)
+            print(f"[INFO COR] Optimizing image {i}")
+            optimized_moving, _ = optimize(fixed, moving)
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
