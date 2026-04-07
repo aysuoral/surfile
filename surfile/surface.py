@@ -49,6 +49,12 @@ class Surface:
 
         self.name = 'Figure'
 
+    @classmethod
+    def _from_pickle(cls, path):
+        sur = np.load(path, allow_pickle=True).item()
+        if type(sur) != cls: raise TypeError(f'[ERROR SURFACE] Cannot unpickle {type(sur)} to Surface')
+        return sur
+
     def openTxt(self, fname, bplt, userscalecorr=[1.0,1.0,1.0], typ='x'):
         """
         Opens a txt file containing the values of the topography
