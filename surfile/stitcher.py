@@ -24,11 +24,7 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree
 from skimage.registration import phase_cross_correlation
 
-
-def ensure_numpy_pcd(func):
-    @wraps(func)
-    def wrapper(data, *args, **kwargs):
-        def to_numpy(item):
+def to_numpy(item):
             if isinstance(item, np.ndarray):
                 return item
             
@@ -43,6 +39,9 @@ def ensure_numpy_pcd(func):
             print(f'[WARN STITCH] Could not ensure ndarray from type {type(item)}')
             return item
 
+def ensure_numpy_pcd(func):
+    @wraps(func)
+    def wrapper(data, *args, **kwargs):
         if isinstance(data, list):
             processed_data = [to_numpy(x) for x in data]
         else:
@@ -99,13 +98,18 @@ def pcd_to_surface(pcds: list[np.ndarray], dx, dy, force_same_size=True, bplt=Fa
     for pcd in pcds:
         points = pcd
 
-        # Plane equation: ax + by + d = z  => [x, y, 1][a, b, d]^T = z
-        A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
-        C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
-        a, b, d = C 
+        # # Plane equation: ax + by + d = z  => [x, y, 1][a, b, d]^T = z
+        # A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+        # C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
+        # a, b, d = C 
         
-        normal = np.array([-a, -b, 1.0])
-        normal /= np.linalg.norm(normal)
+        # normal = np.array([-a, -b, 1.0])
+        # normal /= np.linalg.norm(normal)
+        # print(f"normal1: {normal}")
+
+        normal = pcd_least_squared_plane(pcds)
+        print(f"normal2: {normal}")
+
         
         z_axis = np.array([0, 0, 1])
         v = np.cross(normal, z_axis)
@@ -281,6 +285,36 @@ def remove_outliers_from_point_cloud(point_cloud: o3d.geometry.PointCloud) -> np
     pc, _ = point_cloud.remove_statistical_outlier(nb_neighbors=40, std_ratio=3.0)
     return np.asarray(pc.points)
 
+@ensure_numpy_pcd
+def pcd_least_squared_plane(pcds: list[np.ndarray]):
+    normals = []
+    for pcd in pcds:
+        points = pcd 
+        A = np.c_[points[:, 0], points[:, 1], np.ones(points.shape[0])]
+        C, _, _, _ = np.linalg.lstsq(A, points[:, 2], rcond=None)
+        a, b, d = C 
+        
+        normal = np.array([-a, -b, 1.0])
+        normal /= np.linalg.norm(normal)
+
+        normals.append(normal)
+        
+    return normals
+
+def rotations_from_normals(f,m):
+    fx, fy, fz = f
+    mx, my, mz = m
+
+    r_x = np.arctan2(fz*my - mz*fy, fy*my + fz*mz)
+    r_y = np.arctan2(fx*mz - mx*fz, fx*mx + fz*mz)
+    r_z = np.arctan2(fy*mx - my*fx, fx*mx + fy*my)
+
+    rotation = np.array([r_x, r_y, r_z])
+
+    return rotation
+
+
+
 def merge_and_downsample_point_cloud(pc1: np.ndarray, pc2: np.ndarray, voxel_size=0.001):
     combined = np.vstack([pc1, pc2])
     pc = pcd_to_o3d_pcd(combined)
@@ -402,8 +436,19 @@ class Isolator():
         if max_distance is None:
             dist_hist, dist_bins = np.histogram(np.hstack((dist_f2m, dist_m2f)), 50)
 
-            max_hist_dist = dist_bins[np.nanargmax(dist_hist)]
-            max_distance = max_hist_dist * 1.1
+            max_distance = dist_bins[np.nanargmax(dist_hist) + 1]
+
+            if bplt:
+                fig, ax = plt.subplots()
+
+                ax.hist(dist_f2m, bins=50, alpha=0.5, label="fixed → moving")
+                ax.hist(dist_m2f, bins=50, alpha=0.5, label="moving → fixed")
+
+                ax.hist(np.hstack((dist_f2m, dist_m2f)), bins=50, alpha=0.5, label="all")
+                ax.vlines([max_distance], 0, np.nanmax(dist_hist), label='max distance')
+
+                ax.set_xlabel("Distance")
+                ax.set_ylabel("Count")
 
         fixed_subset = fixed_pts[dist_f2m <= max_distance]
         moving_subset = moving_pts[dist_m2f <= max_distance]
@@ -412,20 +457,6 @@ class Isolator():
 
         if bplt:
             Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
-
-            fig, ax = plt.subplots()
-
-            ax.hist(dist_f2m, bins=50, alpha=0.5, label="fixed → moving")
-            ax.hist(dist_m2f, bins=50, alpha=0.5, label="moving → fixed")
-
-            ax.hist(np.hstack((dist_f2m, dist_m2f)), bins=50, alpha=0.5, label="all")
-            ax.vlines([max_distance], 0, np.nanmax(dist_hist), label='max distance')
-
-            ax.set_xlabel("Distance")
-            ax.set_ylabel("Count")
-
-            plt.show()
-
         return fixed_subset, moving_subset, ax
  
     @staticmethod
@@ -447,29 +478,18 @@ class Isolator():
 
             picked = vis.get_picked_points()
 
-            if len(picked) == 0:
-                print("Selected point = None")
-                return None, None
+            return points[picked], picked
 
-            idx = picked[:]
-            point = points[idx] 
-
-            print("Selected point =", np.array2string(point, formatter={'float_kind': lambda x: f"{x:.6f}"}))
-            print()
-            return point, idx
-        
-        # show_side_by_side(left_pcd, right_pcd)
-
-        left_point, left_idx = pick_point(left_pcd, "Left point cloud")
-        right_point, right_idx = pick_point(right_pcd, "Right point cloud")
+        fixed_subset, left_idx = pick_point(left_pcd, "Left point cloud")
+        moving_subset, right_idx = pick_point(right_pcd, "Right point cloud")
 
         print(f"\033[95mSelected point left =\033[0m",
-               np.array2string(left_point, formatter={'float_kind': lambda x: f"{x:.8f}"}))
+               np.array2string(fixed_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
         print()
         print(f"\033[96mSelected point right =\033[0m",
-               np.array2string(right_point, formatter={'float_kind': lambda x: f"{x:.8f}"}))
+               np.array2string(moving_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
 
-        return left_point, right_point, left_idx, right_idx
+        return fixed_subset, moving_subset
 
 class Thresholder():
     type: str
@@ -764,6 +784,117 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
+    def stitchManual(point_clouds: list[np.ndarray], radius=5,  bplt=False):
+
+        def get_patch(cloud, center, r):
+            dists = np.linalg.norm(cloud - center, axis=1)
+            return cloud[dists < r]
+        
+        def optimize(fixed, moving):
+            fp, mp = Isolator.isolate_manual(fixed, moving)
+
+            # if len(fp) != len(mp):
+            #     raise RuntimeError("[ERROR MANUAL] Select same amount of points from left and right")
+            
+            # if len(fp) < 3:
+            #     print("[ERROR MANUAL] You need to select at least 3 points!")
+
+
+            # # calc traslatıon
+
+            # centroid_fixed = fp.mean(axis=0)
+            # centroid_moving = mp.mean(axis=0)
+
+            # translation = centroid_fixed - centroid_moving
+
+            # print(f"translation = {translation}")
+
+            # normal_f, normal_m = pcd_least_squared_plane([fp, mp])
+            # print(f"[INFO MANUAL] {normal_f=} {normal_m=}")
+
+            # # calc rotatıon
+
+            # # rotation = normal_f - normal_m
+
+            # # rotation = np.arctan2(normal_m, normal_f)
+            # # rotation_deg = np.rad2deg(rotation)
+            # # print(f"Rotation = {rotation}")
+            # # print(f"Rotation deg = {rotation_deg}")
+
+            # rotation = rotations_from_normals(normal_f, normal_m) 
+            
+            if len(fp) != len(mp):
+                raise RuntimeError("[ERROR MANUAL] Select same amount of points from left and right")
+            
+            if len(fp) < 3:
+                print("[ERROR MANUAL] You need to select at least 3 points!")
+
+
+            fixed_patches = []
+            moving_patches = []
+
+            for pf, pm in zip(fp, mp):
+                fixed_patches.append(get_patch(fixed, pf, radius))
+                moving_patches.append(get_patch(moving, pm, radius))
+
+            fp = np.vstack(fixed_patches)
+            mp = np.vstack(moving_patches)
+                
+
+            # calc traslatıon
+
+            centroid_fixed = fp.mean(axis=0)
+            centroid_moving = mp.mean(axis=0)
+
+            translation = centroid_fixed - centroid_moving
+
+            print(f"translation = {translation}")
+
+            normal_f, normal_m = pcd_least_squared_plane([fp, mp])
+            print(f"[INFO MANUAL] {normal_f=} {normal_m=}")
+
+            # calc rotatıon
+
+            # rotation = normal_f - normal_m
+
+            # rotation = np.arctan2(normal_m, normal_f)
+            # rotation_deg = np.rad2deg(rotation)
+            # print(f"Rotation = {rotation}")
+            # print(f"Rotation deg = {rotation_deg}")
+
+            rotation = rotations_from_normals(normal_f, normal_m)       
+
+
+            # create TransforParams
+            tx, ty, tz = translation
+            rx, ry, rz = rotation
+
+            tr = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
+
+            moved = apply_transform(moving, tr)
+
+            # apply transformatıon
+            return moved
+
+
+        fixed = np.asarray(point_clouds[0])
+        point_clouds_T = []
+
+        for i, pc in enumerate(point_clouds[1:]):            
+            moving = np.asarray(pc)
+            moved = optimize(fixed, moving)
+            point_clouds_T.append(moved)
+
+            fixed = np.vstack([fixed, moved])
+
+        if bplt: 
+            show_point_cloud([fixed])
+            show_point_cloud(point_clouds_T, uniform_colors=True)
+
+        return fixed
+
+    @staticmethod
+    @ensure_numpy_pcd
     def stitchRobot(point_clouds: list[np.ndarray], robotTfile, bplt=False):
         """
         Finds the best allignment between surl and surr
@@ -845,7 +976,7 @@ class SurfaceStitcher:
                 moved = apply_transform(moving_pts, p)
 
                 fixed_sub, moved_sub = isolator.apply_isolator(fixed_pts, moved, bplt=False)
-                diffs = KDTree_mutual_diffs(fixed_sub, moved_sub)
+                diffs = KDTree_mutual_diffs(fixed_sub, moved_sub)  # just use the dıfference, not the mutual kdtree
                 rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
                 
                 npoints.append(len(diffs))
