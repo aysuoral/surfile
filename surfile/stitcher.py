@@ -6,6 +6,7 @@
 """
 import copy
 from functools import wraps
+import multiprocessing as mp
 
 from matplotlib import patches, cm
 
@@ -241,7 +242,8 @@ class TransformParams:
         instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = values
         return instance
     
-    def from_kabsch(m: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    @classmethod
+    def from_kabsch(cls, m: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Compute the least-squares roto-translation that maps points m → f.
 
@@ -270,6 +272,8 @@ class TransformParams:
 
         No scaling is applied (pure rotation + translation).
         """
+        instance = cls()
+
         m = np.asarray(m, dtype=float)
         f = np.asarray(f, dtype=float)
         assert m.shape == f.shape and m.ndim == 2 and m.shape[1] == 3
@@ -302,14 +306,10 @@ class TransformParams:
         
         # from rotation matrix to angles
         r = R.from_matrix(R_m)
-        rx, ry, rz  = r.as_euler('xyz', degrees=True)
-    
+        instance.rx, instance.ry, instance.rz  = r.as_euler('xyz', degrees=True)
+        instance.tx, instance.ty, instance.tz = t
 
-        # from traslation vector to traslations
-
-        tx, ty, tz = t
-
-        return tx, ty, tz, rx, ry, rz
+        return instance
     
     def get_params(self):
         return [self.rx, self.ry, self.rz, self.tx, self.ty, self.tz]
@@ -400,7 +400,7 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
     # per colorare in base alle normali
     if colors == "normal":
         for i, pc in enumerate(point_clouds):
-            pc.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=3))
+            pc.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=20))
             # pc.orient_normals_consistent_tangent_plane(10)
             # pc.orient_normals_to_align_with_direction([1, 0, 0])
             normals = np.asarray(pc.normals)
@@ -438,6 +438,7 @@ class Isolator():
     geometrical: str = 'geometrical'
     maxmin: str = 'maxmin'
     KDTree: str = 'KDTree'
+    manual: str = 'manual'
 
     type: str
 
@@ -451,6 +452,7 @@ class Isolator():
         if self.type == 'geometrical': return self.isolate_common_points_geometrical(fixed_pts, moving_pts, self.stitchprc, bplt)
         elif self.type == 'maxmin': return self.isolate_common_points_max_min(fixed_pts, moving_pts, self.axes, bplt)
         elif self.type == 'KDTree': return self.isolate_common_points_kdtree(fixed_pts, moving_pts, self.max_distance, bplt)
+        elif self.type == 'manual': return self.isolate_manual(fixed_pts, moving_pts)
 
         else:
             raise ValueError('Unknown isolator type')
@@ -539,10 +541,32 @@ class Isolator():
  
     @staticmethod
     def isolate_manual(left_pcd: np.ndarray, right_pcd: np.ndarray):
+        queue_l = mp.Queue()
+        queue_r = mp.Queue()
 
-        def pick_point(points, window_name):
-            pcd_o3d = o3d.geometry.PointCloud()
-            pcd_o3d.points = o3d.utility.Vector3dVector(points)
+        p_l = mp.Process(target=Isolator._pick_point, args=(left_pcd, 'Select points L', queue_l, 0))
+        p_r = mp.Process(target=Isolator._pick_point, args=(right_pcd, 'Select points R', queue_r, 1000))
+
+        p_l.start()
+        p_r.start()
+
+        p_l.join()
+        p_r.join()
+
+        fixed_subset = queue_l.get()
+        moving_subset = queue_r.get()
+
+        print(f"\033[95mSelected point left =\033[0m",
+               np.array2string(fixed_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
+        print()
+        print(f"\033[96mSelected point right =\033[0m",
+               np.array2string(moving_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
+
+        return fixed_subset, moving_subset
+    
+    @staticmethod
+    def _pick_point(points, window_name, queue, left=0):
+            pcd_o3d = pcd_to_o3d_pcd(points)
 
             print(f"\n{window_name}")
             print("Select the point with Shift + left click")
@@ -551,7 +575,7 @@ class Isolator():
             pcd_o3d = assign_defined_colors_to_point_clouds([pcd_o3d], colors="normal")[0]
 
             vis = o3d.visualization.VisualizerWithEditing()
-            vis.create_window(window_name=window_name)
+            vis.create_window(window_name=window_name, width=900, height=900, left=left, top=50)
             vis.add_geometry(pcd_o3d)
 
             render_option = vis.get_render_option()
@@ -561,19 +585,7 @@ class Isolator():
             vis.destroy_window()
 
             picked = vis.get_picked_points()
-
-            return points[picked], picked
-
-        fixed_subset, left_idx = pick_point(left_pcd, "Left point cloud")
-        moving_subset, right_idx = pick_point(right_pcd, "Right point cloud")
-
-        print(f"\033[95mSelected point left =\033[0m",
-               np.array2string(fixed_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
-        print()
-        print(f"\033[96mSelected point right =\033[0m",
-               np.array2string(moving_subset, formatter={'float_kind': lambda x: f"{x:.8f}"}))
-
-        return fixed_subset, moving_subset
+            queue.put(points[picked])
 
 class Thresholder():
     type: str
@@ -878,36 +890,6 @@ class SurfaceStitcher:
         
         def optimize(fixed, moving):
             fp, mp = Isolator.isolate_manual(fixed, moving)
-
-            # if len(fp) != len(mp):
-            #     raise RuntimeError("[ERROR MANUAL] Select same amount of points from left and right")
-            
-            # if len(fp) < 3:
-            #     print("[ERROR MANUAL] You need to select at least 3 points!")
-
-
-            # # calc traslatıon
-
-            # centroid_fixed = fp.mean(axis=0)
-            # centroid_moving = mp.mean(axis=0)
-
-            # translation = centroid_fixed - centroid_moving
-
-            # print(f"translation = {translation}")
-
-            # normal_f, normal_m = pcd_least_squared_plane([fp, mp])
-            # print(f"[INFO MANUAL] {normal_f=} {normal_m=}")
-
-            # # calc rotatıon
-
-            # # rotation = normal_f - normal_m
-
-            # # rotation = np.arctan2(normal_m, normal_f)
-            # # rotation_deg = np.rad2deg(rotation)
-            # # print(f"Rotation = {rotation}")
-            # # print(f"Rotation deg = {rotation_deg}")
-
-            # rotation = rotations_from_normals(normal_f, normal_m) 
             
             if len(fp) != len(mp):
                 raise RuntimeError("[ERROR MANUAL] Select same amount of points from left and right")
@@ -926,10 +908,7 @@ class SurfaceStitcher:
             fp = np.vstack(fixed_patches)
             mp = np.vstack(moving_patches)
            
-            tx, ty, tz, rx, ry, rz = TransformParams.from_kabsch(mp, fp)          
-
-
-            RTM = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
+            RTM = TransformParams.from_kabsch(mp, fp)          
 
             moved = apply_transform(moving, RTM)
 
@@ -949,13 +928,12 @@ class SurfaceStitcher:
 
         if bplt: 
             show_point_cloud([fixed])
-            show_point_cloud([point_clouds[0]] + point_clouds_T, colors=None)
+            show_point_cloud([point_clouds[0]] + point_clouds_T)
 
         # saving in a pickle file:
-        with open("point_clouds.pkl", "wb") as f:
-            pickle.dump((fixed, point_clouds_T), f)
+        # with open("point_clouds.pkl", "wb") as f:
+        #     pickle.dump((fixed, point_clouds_T), f)
 
-        
         return fixed, point_clouds_T
 
     @staticmethod

@@ -22,6 +22,11 @@ from PIL import Image
 import pathlib
 import struct
 import matplotlib.pyplot as plt
+import os
+from os import walk
+import open3d as o3d
+import re
+from preprocess import pickle_folder
 
 withigor = 0
 # try:
@@ -35,7 +40,89 @@ try:
 except ImportError:
     print('[WARN] csaps not found: use')
     print('[WARN] pip install csaps')
+
+
+############## point cloud file management ############
+def open_pc_from_file(path: str, bplt=False) -> np.ndarray:
+
+    pc_list = []
+    for(_, _, files) in walk(path):
+        for f in files:
+            full_path = os.path.join(path, f)
+
+            print(f)
+
+            try:
+                if f.endswith('.txt'):
+                    with open(full_path) as f_tmp:
+                        test = f_tmp.readline()
+                        test = test.strip()
+                        parts = re.split(r"[,\s;]+", test)
+
+                        if len(parts) == 3:
+                        
+                            if not (len(parts[0]) == len(parts[1]) and len(parts[1]) == len(parts[2])):
+                                print("Warning: it might not be a point cloud")
+
+                            pc = np.genfromtxt(full_path, unpack=False, usecols=(0, 1, 2), delimiter=detect_csv_separator(full_path))
+                        else:
+                            raise IndexError(f"File has {len(parts)} columns...")
+
+                elif f.endswith(".npy"):
+                    pc = np.load(full_path, allow_pickle=True)
+                
+                elif f.endswith('.stl'):
+                    mesh = o3d.io.read_triangle_mesh(full_path)
+                    pc = np.asarray(mesh.vertices)
+                else:
+                    raise TypeError("Unsupported file type...")
+
+                pc_list.append(pc)
+
+            except Exception as e:
+                print(f"{e} ---> {full_path}")
     
+    assert len(pc_list) > 0, "Empty list!!!" 
+    return pc_list
+
+############## surface file management ############
+def open_sur_from_file(folder_path,
+                        bplt=False,
+                        downsample_factor=1,
+                        rotate_angle=0,
+                        removeNM=True,
+                        userscalecorr=[1,1,1]):
+    surfaces =  []
+
+    for (_, _, files) in walk(folder_path):
+        pickled_files = [f for f in files if f.endswith("_pikled.npy")]
+
+        if len(pickled_files) > 0:
+            for f in pickled_files:
+                full_path = os.path.join(folder_path, f)
+                s = open_sur_from_pickle(full_path)
+                surfaces.append(s)
+
+        else:
+            pickle_folder(folder_path,
+                      downsample_factor=downsample_factor,
+                      rotate_angle=rotate_angle,
+                      removeNM=removeNM,
+                      userscalecorr=userscalecorr)
+
+            files = next(walk(folder_path))[2]
+
+            for f in pickled_files:
+                full_path = os.path.join(folder_path, f)
+                s = open_sur_from_pickle(full_path)
+                surfaces.append(s)
+
+    return surfaces
+
+def open_sur_from_pickle(path):
+    sur = np.load(path, allow_pickle=True).item()
+    return sur
+
 def read_microscopedata(filename, userscalecorr, interpolflag):
     """
     Main function that reads from files according to the file extension
