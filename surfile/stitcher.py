@@ -24,6 +24,8 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree
 from skimage.registration import phase_cross_correlation
 
+import pickle
+
 def to_numpy(item):
             if isinstance(item, np.ndarray):
                 return item
@@ -239,6 +241,76 @@ class TransformParams:
         instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = values
         return instance
     
+    def from_kabsch(m: np.ndarray, f: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Compute the least-squares roto-translation that maps points m → f.
+
+        Parameters
+        ----------
+        m : (N, 3)  moving  points
+        f : (N, 3)  fixed   points
+
+        Returns
+        -------
+        tx, ty, tz : float
+            Translation components along x, y, z axes.
+        rx, ry, rz : float
+            Rotation angles (in degrees) around x, y, z axes (XYZ convention).
+
+        After the transform:
+            f_approx = (R @ m.T).T + t
+
+        Info
+        ----
+        Roto-translation (rigid body) alignment of 3 moving points to 3 fixed points.
+        Algorithm: Kabsch (1976) — minimises RMSD via SVD on the cross-covariance matrix.
+
+        The resulting rotation matrix is converted to Euler angles (XYZ order, degrees),
+        and the translation vector is split into its components.
+
+        No scaling is applied (pure rotation + translation).
+        """
+        m = np.asarray(m, dtype=float)
+        f = np.asarray(f, dtype=float)
+        assert m.shape == f.shape and m.ndim == 2 and m.shape[1] == 3
+
+        # 1. Centroid subtraction
+        cm = m.mean(axis=0)
+        cf = f.mean(axis=0)
+        m_c = m - cm
+        f_c = f - cf
+
+        # 2. Cross-covariance matrix  H = m_centred^T · f_centred
+        H = m_c.T @ f_c          # (3, 3)
+
+        # 3. SVD
+        U, S, Vt = np.linalg.svd(H)
+
+        # 4. Correct for reflection (det check ensures a proper rotation, det = +1)
+        d = np.linalg.det(Vt.T @ U.T)
+        D = np.diag([1.0, 1.0, d])   # d = sign(det); flips last singular vector if needed
+
+        # 5. Rotation and translation
+        R_m = Vt.T @ D @ U.T
+
+        t = cf - R_m @ cm
+
+        # 6. Homogeneous 4×4 matrix
+        T = np.eye(4)
+        T[:3, :3] = R_m
+        T[:3,  3] = t
+        
+        # from rotation matrix to angles
+        r = R.from_matrix(R_m)
+        rx, ry, rz  = r.as_euler('xyz', degrees=True)
+    
+
+        # from traslation vector to traslations
+
+        tx, ty, tz = t
+
+        return tx, ty, tz, rx, ry, rz
+    
     def get_params(self):
         return [self.rx, self.ry, self.rz, self.tx, self.ty, self.tz]
     
@@ -301,20 +373,6 @@ def pcd_least_squared_plane(pcds: list[np.ndarray]):
         
     return normals
 
-def rotations_from_normals(f,m):
-    fx, fy, fz = f
-    mx, my, mz = m
-
-    r_x = np.arctan2(fz*my - mz*fy, fy*my + fz*mz)
-    r_y = np.arctan2(fx*mz - mx*fz, fx*mx + fz*mz)
-    r_z = np.arctan2(fy*mx - my*fx, fx*mx + fy*my)
-
-    rotation = np.array([r_x, r_y, r_z])
-
-    return rotation
-
-
-
 def merge_and_downsample_point_cloud(pc1: np.ndarray, pc2: np.ndarray, voxel_size=0.001):
     combined = np.vstack([pc1, pc2])
     pc = pcd_to_o3d_pcd(combined)
@@ -322,13 +380,13 @@ def merge_and_downsample_point_cloud(pc1: np.ndarray, pc2: np.ndarray, voxel_siz
     return np.asarray(pc_down.points)
 
 @ensure_o3d_pc
-def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], uniform_colors=False):
-    if uniform_colors:
-        point_clouds = assign_defined_colors_to_point_clouds(point_clouds)
-    o3d.visualization.draw_geometries(point_clouds)
+def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], colors="normal"):
+    if colors is not None:
+        point_clouds = assign_defined_colors_to_point_clouds(point_clouds, colors)
+    o3d.visualization.draw_geometries(point_clouds, point_show_normal=False)
 
 @ensure_o3d_pc
-def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointCloud], colors: list | None = None):
+def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointCloud], colors: None | str = None):
     """
     Given a list of pc and a list of colors paints uniform color the pc, if the colors are not given assigns automatically a color to each pc
 
@@ -336,25 +394,45 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
     ----------
     point_clouds : list[o3d.geometry.PointCloud]
         the pcs
-    colors : list | None
-        The colors, can be strings, rgb tuples, rgb vectors, color hex string, None
+    colors : list | None | str
+        The colors, can be strings, rgb tuples, rgb vectors, color hex string, None or "normal" to color based on the point cloud's normals.
     """
-    num_pcs = len(point_clouds)
+    # per colorare in base alle normali
+    if colors == "normal":
+        for i, pc in enumerate(point_clouds):
+            pc.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=3))
+            # pc.orient_normals_consistent_tangent_plane(10)
+            # pc.orient_normals_to_align_with_direction([1, 0, 0])
+            normals = np.asarray(pc.normals)
 
-    if colors is None:
+            colors = (normals + 1) / 2  # da [-1,1] a [0,1]
+            pc.colors = o3d.utility.Vector3dVector(colors)
+        return point_clouds
+
+    elif colors == "uniform":
+        num_pcs = len(point_clouds)
         cmap = plt.get_cmap("tab10")  # pastel1, pastel2, Accent
         colors = [cmap(i % 10) for i in range(num_pcs)]
 
-    if len(colors) < num_pcs:
-        print(f"Warning: Only {len(colors)} colors provided for {num_pcs} point clouds. Cycling colors.")
+        for i, pc in enumerate(point_clouds):
+            raw_color = colors[i % len(colors)]
+            rgb_color = np.asarray(mcolors.to_rgb(raw_color))
+            
+            pc.paint_uniform_color(rgb_color)
 
-    for i, pc in enumerate(point_clouds):
-        raw_color = colors[i % len(colors)]
-        rgb_color = np.asarray(mcolors.to_rgb(raw_color))
+        return point_clouds
+    
+    else:
+        for i, pc in enumerate(point_clouds):
+            z = np.asarray(pc.points)[:, 2]
+            n1 = (z - z.min()) / (z.max() - z.min())
+            p = np.asarray(pc.points)
+            n2 = np.linalg.norm(p - np.mean(p, axis=0), axis=1) 
+            n2 = (n2 - n2.min()) / (n2.max() - n2.min())
+            cc = plt.get_cmap(colors)(n2 * n1)[:, :3]
+            pc.colors = o3d.utility.Vector3dVector(cc)
         
-        pc.paint_uniform_color(rgb_color)
-
-    return point_clouds
+        return point_clouds
 
 class Isolator():
     geometrical: str = 'geometrical'
@@ -379,7 +457,7 @@ class Isolator():
     
     @staticmethod
     def plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts): 
-        show_point_cloud([fixed_subset, moving_subset], uniform_colors=True)
+        show_point_cloud([fixed_subset, moving_subset], colors=None)
 
     @staticmethod
     def isolate_common_points_geometrical(fixed_pts: np.ndarray, moving_pts: np.ndarray, stitchprc=80, bplt=False):
@@ -470,9 +548,15 @@ class Isolator():
             print("Select the point with Shift + left click")
             print("Remove the last selected point with Shift + right")
 
+            pcd_o3d = assign_defined_colors_to_point_clouds([pcd_o3d], colors="normal")[0]
+
             vis = o3d.visualization.VisualizerWithEditing()
             vis.create_window(window_name=window_name)
             vis.add_geometry(pcd_o3d)
+
+            render_option = vis.get_render_option()
+            render_option.point_size = 0.5
+
             vis.run()
             vis.destroy_window()
 
@@ -788,7 +872,9 @@ class SurfaceStitcher:
 
         def get_patch(cloud, center, r):
             dists = np.linalg.norm(cloud - center, axis=1)
-            return cloud[dists < r]
+            print(f"get_patch found {len(mask := (cloud[dists < r]))} points near selected point ({center})")
+            mean_patch_point = np.mean(mask, axis=0)
+            return mean_patch_point
         
         def optimize(fixed, moving):
             fp, mp = Isolator.isolate_manual(fixed, moving)
@@ -839,39 +925,13 @@ class SurfaceStitcher:
 
             fp = np.vstack(fixed_patches)
             mp = np.vstack(moving_patches)
-                
-
-            # calc traslatıon
-
-            centroid_fixed = fp.mean(axis=0)
-            centroid_moving = mp.mean(axis=0)
-
-            translation = centroid_fixed - centroid_moving
-
-            print(f"translation = {translation}")
-
-            normal_f, normal_m = pcd_least_squared_plane([fp, mp])
-            print(f"[INFO MANUAL] {normal_f=} {normal_m=}")
-
-            # calc rotatıon
-
-            # rotation = normal_f - normal_m
-
-            # rotation = np.arctan2(normal_m, normal_f)
-            # rotation_deg = np.rad2deg(rotation)
-            # print(f"Rotation = {rotation}")
-            # print(f"Rotation deg = {rotation_deg}")
-
-            rotation = rotations_from_normals(normal_f, normal_m)       
+           
+            tx, ty, tz, rx, ry, rz = TransformParams.from_kabsch(mp, fp)          
 
 
-            # create TransforParams
-            tx, ty, tz = translation
-            rx, ry, rz = rotation
+            RTM = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
 
-            tr = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
-
-            moved = apply_transform(moving, tr)
+            moved = apply_transform(moving, RTM)
 
             # apply transformatıon
             return moved
@@ -889,9 +949,14 @@ class SurfaceStitcher:
 
         if bplt: 
             show_point_cloud([fixed])
-            show_point_cloud(point_clouds_T, uniform_colors=True)
+            show_point_cloud([point_clouds[0]] + point_clouds_T, colors=None)
 
-        return fixed
+        # saving in a pickle file:
+        with open("point_clouds.pkl", "wb") as f:
+            pickle.dump((fixed, point_clouds_T), f)
+
+        
+        return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
@@ -930,7 +995,7 @@ class SurfaceStitcher:
         
         if bplt: 
             show_point_cloud([fixed_ref])
-            show_point_cloud(point_clouds_T, uniform_colors=True)
+            show_point_cloud(point_clouds_T, colors=None)
         
         return fixed_ref, point_clouds_T    
 
@@ -1030,7 +1095,7 @@ class SurfaceStitcher:
         fixed_pc = fixed
 
         if bplt:
-            show_point_cloud([fixed_pc])
+            show_point_cloud([fixed_pc], colors=None)
 
         return fixed_pc
     
