@@ -25,7 +25,9 @@ from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree
 from skimage.registration import phase_cross_correlation
 
+import os
 import pickle
+from pathlib import Path
 
 def to_numpy(item):
             if isinstance(item, np.ndarray):
@@ -311,6 +313,23 @@ class TransformParams:
 
         return instance
     
+    @classmethod
+    def from_pickle(cls, filepath: str):
+        instance = cls()
+        filepath = Path(filepath)
+
+        with open(filepath, "rb") as f:
+            instance = pickle.load(f)
+        return instance
+
+    def to_pickle(self,  filepath: str):
+        filepath: Path = Path(filepath)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(filepath, "wb") as f:
+            pickle.dump(self, f)
+            print(f'[INFO TRANSFORM PICKLE] Saved {filepath.name}')
+
     def get_params(self):
         return [self.rx, self.ry, self.rz, self.tx, self.ty, self.tz]
     
@@ -413,6 +432,28 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
         num_pcs = len(point_clouds)
         cmap = plt.get_cmap("tab10")  # pastel1, pastel2, Accent
         colors = [cmap(i % 10) for i in range(num_pcs)]
+
+        return point_clouds
+
+    else:
+        for i, pc in enumerate(point_clouds):
+            pts = np.asarray(pc.points)
+            z = pts[:, 2]
+
+            z_min = z.min()
+            z_max = z.max()
+
+            if z_max - z_min == 0:
+                z_norm = np.zeros_like(z)
+            else:
+                z_norm = (z - z_min) / (z_max - z_min)
+
+            cmap = plt.get_cmap(colors)   # you can also try "turbo"
+            rgb = cmap(z_norm)[:, :3]
+
+            pc.colors = o3d.utility.Vector3dVector(rgb)
+
+            return point_clouds
 
         for i, pc in enumerate(point_clouds):
             raw_color = colors[i % len(colors)]
@@ -591,8 +632,6 @@ class Thresholder():
     type: str
 
     value: str = 'value'
-    sphere: str = 'sphere'
-    cuboid: str = 'cuboid'
     KDTree: str = 'KDTree'
 
     def __init__(self, type: str, val=20, threshold_expansion=1.2):
@@ -602,36 +641,13 @@ class Thresholder():
 
     def apply_thresholder(self, fixed_subset, moving_subset):
         if self.type == 'value': return self.threshold_value(self.val)
-        elif self.type == 'sphere': return self.threshold_sphere(fixed_subset, moving_subset)
-        elif self.type == 'cuboid': return self.threshold_cuboid(fixed_subset, moving_subset, self.threshold_expansion)
         elif self.type == 'KDTree': return self.threshold_KDTree(fixed_subset, moving_subset, self.threshold_expansion)
         else:
             raise ValueError('Unknown thresholder type')
     
     @staticmethod    
     def threshold_value(x): return x
-    
-    @staticmethod
-    def threshold_sphere(fixed_subset, moving_subset):
-        c_fixed = np.mean(fixed_subset, axis=0)
-        c_moving = np.mean(moving_subset, axis=0)
 
-        r_fixed = ...
-        r_moving = ...
-    
-    @staticmethod
-    def threshold_cuboid(fixed_subset, moving_subset, threshold_expansion=3):
-        x_mM, y_mM, z_mM = get_common_boundries(fixed_subset, moving_subset)
-
-        x_overlap = max(0, x_mM[1] - x_mM[0])
-        y_overlap = max(0, y_mM[1] - y_mM[0])
-        z_overlap = max(0, z_mM[1] - z_mM[0])
-
-        volume = x_overlap * y_overlap * z_overlap
-        threshold = threshold_expansion * (volume ** (1/3))
-
-        return threshold
-    
     @staticmethod
     def threshold_KDTree(fixed_subset, moving_subset, threshold_expansion=1.2):
         diffs = KDTree_mutual_diffs(fixed_subset, moving_subset)
@@ -880,7 +896,45 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchManual(point_clouds: list[np.ndarray], radius=5,  bplt=False):
+    def stitchSavedTransforms(point_clouds: list[np.ndarray], transforms_folder, ignore_first=True, bplt=True):
+
+        transforms_folder = Path(transforms_folder)
+
+        fixed = np.asarray(point_clouds[0])
+        point_clouds_T = []
+
+        transform_files = sorted(
+            transforms_folder.glob("*.pkl"),
+            key=lambda p: int(p.stem)
+        )
+
+        if len(transform_files) < len(point_clouds) - 1:
+            raise ValueError(
+                f"[ERROR SAVED_TRANSFORMS] Not enough transform files. Expected at least {len(point_clouds) - 1}, found {len(transform_files)}"
+            )
+
+        start_i = 1 if ignore_first else 0
+        params0 = TransformParams.from_pickle(transform_files[0]) if not ignore_first else None # Only ıf dont ignore first apply 0 transform to all
+        for i, pc in enumerate(point_clouds[start_i:]):
+            moving = np.asarray(pc)
+
+            transform_file = transform_files[i]
+            params = TransformParams.from_pickle(transform_file)
+
+            moved = apply_transform(moving, params, params0=params0)
+            point_clouds_T.append(moved)
+
+            fixed = np.vstack([fixed, moved])
+
+        if bplt:
+            show_point_cloud([fixed], colors="height")
+            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="height")
+
+        return fixed, point_clouds_T
+
+    @staticmethod
+    @ensure_numpy_pcd
+    def stitchManual(point_clouds: list[np.ndarray], radius=5,  bplt=False, save_transform=None):
 
         def get_patch(cloud, center, r):
             dists = np.linalg.norm(cloud - center, axis=1)
@@ -897,7 +951,6 @@ class SurfaceStitcher:
             if len(fp) < 3:
                 print("[ERROR MANUAL] You need to select at least 3 points!")
 
-
             fixed_patches = []
             moving_patches = []
 
@@ -908,13 +961,13 @@ class SurfaceStitcher:
             fp = np.vstack(fixed_patches)
             mp = np.vstack(moving_patches)
            
-            RTM = TransformParams.from_kabsch(mp, fp)          
+            RTM: TransformParams = TransformParams.from_kabsch(mp, fp)
+            if save_transform is not None: RTM.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
 
             moved = apply_transform(moving, RTM)
 
             # apply transformatıon
             return moved
-
 
         fixed = np.asarray(point_clouds[0])
         point_clouds_T = []
@@ -927,18 +980,14 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, moved])
 
         if bplt: 
-            show_point_cloud([fixed])
-            show_point_cloud([point_clouds[0]] + point_clouds_T)
-
-        # saving in a pickle file:
-        # with open("point_clouds.pkl", "wb") as f:
-        #     pickle.dump((fixed, point_clouds_T), f)
+            show_point_cloud([fixed], colors="height")
+            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="height")
 
         return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchRobot(point_clouds: list[np.ndarray], robotTfile, bplt=False):
+    def stitchRobot(point_clouds: list[np.ndarray], robotTfile, save_transform=None, bplt=False):
         """
         Finds the best allignment between surl and surr
         by using the robot positions and rotations recorded in robotTfile
@@ -959,6 +1008,7 @@ class SurfaceStitcher:
             
             tr = TransformParams.from_file(robotTfile, i, header=1)
             tr.rescale(1000)
+            if save_transform is not None: tr.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
             robot_trans.append(tr)
             
         print(f"[INFO ROBOT STITCH] Loaded {len(robot_trans)} robot transformations for {len(point_clouds_clean)} surfaces")
@@ -970,7 +1020,7 @@ class SurfaceStitcher:
             pts_T = apply_transform(pts, trasf, params0=robot_trans[0])
             point_clouds_T.append(pts_T)
             fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
-        
+
         if bplt: 
             show_point_cloud([fixed_ref])
             show_point_cloud(point_clouds_T, colors=None)
@@ -979,7 +1029,7 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator: Isolator, bplt=False):
+    def stitchRMSE(point_clouds_T: list[np.ndarray], n_calls, isolator: Isolator, save_transform=None, bplt=False):
         """
         Finds the best alignment between transformed point clouds
         by minimizing the RMSE between mutually matched points
@@ -1009,7 +1059,7 @@ class SurfaceStitcher:
         """
         def optimize(fixed_pts, moving_pts):
             U_tx, U_ty, U_tz = 55.2, 60.6, 69.3  
-            U_theta = 0.5  
+            U_theta = 0.5
 
             # tx ty tz rx ry rz
             t0 = [0, 0, 0, 0, 0, 0]
@@ -1039,6 +1089,7 @@ class SurfaceStitcher:
 
             best = res.x
             best_p = TransformParams.from_list(best)
+            if save_transform is not None: best_p.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
             
             aligned = apply_transform(moving_pts, best_p)
 
@@ -1079,7 +1130,7 @@ class SurfaceStitcher:
     
     @staticmethod
     @ensure_numpy_pcd
-    def stitchICP(point_clouds_T: list[np.ndarray], thresholder: Thresholder, isolator: None | Isolator, bplt=False):
+    def stitchICP(point_clouds_T: list[np.ndarray], thresholder: Thresholder, isolator: None | Isolator, save_transform, bplt=False):
         """
         Refines the alignment of transformed point clouds using ICP.
 
@@ -1136,6 +1187,11 @@ class SurfaceStitcher:
                 o3d.pipelines.registration.TransformationEstimationPointToPoint(),
                 o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=1000))
             
+            if save_transform is not None:     
+                os.makedirs(save_transform, exist_ok=True)
+                with open(os.path.join(save_transform, f"{i}.pkl"), "wb") as f:
+                    pickle.dump(reg_p2p.transformation, f)
+            
             aligned = apply_transform(moving_pts, reg_p2p.transformation)
 
             return aligned, reg_p2p
@@ -1160,7 +1216,7 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, bplt=False):
+    def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, save_transform, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
             [fixed_scaled, moving_scaled], scales = rescale_point_cloud([fixed_pts, moving_pts])
@@ -1207,6 +1263,10 @@ class SurfaceStitcher:
                 )
             )
 
+            if save_transform is not None:
+                os.makedirs(save_transform, exist_ok=True)
+                with open(os.path.join(save_transform, f"{i}.pkl"), "wb") as f:
+                    pickle.dump(reg_fgr.transformation, f)
 
             aligned_scaled = apply_transform(moving_scaled, reg_fgr.transformation)  
 
@@ -1233,7 +1293,7 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchCorrelation(point_clouds_T: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, bplt=False):
+    def stitchCorrelation(point_clouds_T: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, save_transform=None, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
 
@@ -1344,6 +1404,11 @@ class SurfaceStitcher:
             aligned[:, 1] += ty
             aligned[:, 2] += tz
 
+            rx = ry = rz = 0
+
+            tr = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
+            if save_transform is not None: tr.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
+
             print(f"before mean z = {np.mean(moving_pts[:, 2])}")
             print(f"after mean z  = {np.mean(aligned[:, 2])}")
 
@@ -1379,9 +1444,6 @@ class SurfaceStitcher:
             #     plt.show()
 
             return aligned, [tx, ty]
-
-        
-
 
         fixed = np.asarray(point_clouds_T[0])
 

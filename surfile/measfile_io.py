@@ -26,7 +26,6 @@ import os
 from os import walk
 import open3d as o3d
 import re
-from preprocess import pickle_folder
 
 withigor = 0
 # try:
@@ -82,16 +81,11 @@ def open_pc_from_file(path: str, bplt=False) -> np.ndarray:
             except Exception as e:
                 print(f"{e} ---> {full_path}")
     
-    assert len(pc_list) > 0, "Empty list!!!" 
+    assert len(pc_list) > 0, "[ERROR OPEN PC FILE] Empty list!!!" 
     return pc_list
 
 ############## surface file management ############
-def open_sur_from_file(folder_path,
-                        bplt=False,
-                        downsample_factor=1,
-                        rotate_angle=0,
-                        removeNM=True,
-                        userscalecorr=[1,1,1]):
+def open_sur_from_folder(folder_path):
     surfaces =  []
 
     for (_, _, files) in walk(folder_path):
@@ -104,18 +98,7 @@ def open_sur_from_file(folder_path,
                 surfaces.append(s)
 
         else:
-            pickle_folder(folder_path,
-                      downsample_factor=downsample_factor,
-                      rotate_angle=rotate_angle,
-                      removeNM=removeNM,
-                      userscalecorr=userscalecorr)
-
-            files = next(walk(folder_path))[2]
-
-            for f in pickled_files:
-                full_path = os.path.join(folder_path, f)
-                s = open_sur_from_pickle(full_path)
-                surfaces.append(s)
+            print('[ERROR OPEN SUR FOLDER] No pickled files in folder')
 
     return surfaces
 
