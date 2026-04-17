@@ -433,14 +433,12 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
             pc.colors = o3d.utility.Vector3dVector(ncolors)
 
         elif colors == "uniform":
-            print('Painting uniform')
             raw_color = unicolors[i % len(unicolors)]
             rgb_color = np.asarray(mcolors.to_rgb(raw_color))
             
             pc.paint_uniform_color(rgb_color)
 
         else:
-            print('Painting cmap')
             pts = np.asarray(pc.points)
             z = pts[:, 2]
 
@@ -456,7 +454,7 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
             rgb = cmap(z_norm)[:, :3]
             pc.colors = o3d.utility.Vector3dVector(rgb)
         
-        return point_clouds
+    return point_clouds
     
 
 class Isolator():
@@ -885,7 +883,7 @@ class SurfaceStitcher:
         transforms_folder = Path(transforms_folder)
 
         fixed = np.asarray(point_clouds[0])
-        point_clouds_T = []
+        point_clouds_T = [point_clouds[0]]
 
         transform_files = sorted(
             transforms_folder.glob("*.pkl"),
@@ -902,19 +900,18 @@ class SurfaceStitcher:
         for i, pc in enumerate(point_clouds[start_i:]):
             moving = np.asarray(pc)
 
-            transform_file = transform_files[i]
-            params = TransformParams.from_pickle(transform_file)
+            loaded_params = [TransformParams.from_pickle(f) for f in transform_files]
+            params = loaded_params[i]
+            # params = TransformParams.from_pickle(transform_file)
 
             moved = apply_transform(moving, params, params0=params0)
             point_clouds_T.append(moved)
 
             fixed = np.vstack([fixed, moved])
 
-        point_clouds_T = [point_clouds[0]] + point_clouds_T
-
         if bplt:
             show_point_cloud([fixed], colors="viridis")
-            show_point_cloud(point_clouds_T, colors="viridis")
+            show_point_cloud(point_clouds_T, colors="uniform")
 
         return fixed, point_clouds_T
 
@@ -943,11 +940,8 @@ class SurfaceStitcher:
             fixed_o3d = pcd_to_o3d_pcd(fixed)
             moving_o3d = pcd_to_o3d_pcd(moving)
 
-            fp_d = fixed_o3d.voxel_down_sample(voxel_size)
-            mp_d = moving_o3d.voxel_down_sample(voxel_size)
-
-            fp_d = np.asarray(fp_d.points)
-            mp_d = np.asarray(mp_d.points)
+            fp_d = np.asarray(fixed_o3d.points)
+            mp_d = np.asarray(moving_o3d.points)
             
             fp, mp = Isolator.isolate_manual(fp_d, mp_d)
             
@@ -976,7 +970,7 @@ class SurfaceStitcher:
             return moved
 
         fixed = np.asarray(point_clouds[0])
-        point_clouds_T = []
+        point_clouds_T = [point_clouds[0]]
 
         for i, pc in enumerate(point_clouds[1:]):            
             moving = np.asarray(pc)
@@ -987,7 +981,7 @@ class SurfaceStitcher:
 
         if bplt: 
             show_point_cloud([fixed], colors="viridis")
-            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="viridis")
+            show_point_cloud(point_clouds_T, colors="uniform")
 
         return fixed, point_clouds_T
 
@@ -1064,7 +1058,7 @@ class SurfaceStitcher:
             aligning and merging all point clouds
         """
         def optimize(fixed_pts, moving_pts):
-            U_tx, U_ty, U_tz = 55.2, 60.6, 69.3  
+            U_tx, U_ty, U_tz =  55.2, 60.6, 69.3  
             U_theta = 0.5
 
             # tx ty tz rx ry rz
@@ -1076,11 +1070,11 @@ class SurfaceStitcher:
 
                 fixed_sub, moved_sub = isolator.apply_isolator(fixed_pts, moved, bplt=False)
                 diffs = KDTree_mutual_diffs(fixed_sub, moved_sub)  # just use the dıfference, not the mutual kdtree
+
                 rmse = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
                 
                 npoints.append(len(diffs))
                 rmses.append(rmse)
-                print("one iteration has been done")
                 return rmse
 
             space = [
@@ -1091,7 +1085,7 @@ class SurfaceStitcher:
                 Real(t0[4] - U_theta, t0[4] + U_theta),
                 Real(t0[5] - U_theta, t0[5] + U_theta),
             ]
-
+            
             res = gp_minimize(objective, space, x0=t0, n_calls=n_calls, random_state=42)
 
             best = res.x
@@ -1131,7 +1125,7 @@ class SurfaceStitcher:
         fixed_pc = fixed
 
         if bplt:
-            show_point_cloud([fixed_pc], colors=None)
+            show_point_cloud([fixed_pc], colors='normal')
 
         return fixed_pc
     

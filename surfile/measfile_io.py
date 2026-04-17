@@ -42,7 +42,7 @@ except ImportError:
 
 
 ############## point cloud file management ############
-def open_pc_from_file(path: str, bplt=False) -> np.ndarray:
+def open_pc_from_file(path: str, resave={'resave': False, 'resample': 10}) -> np.ndarray:
 
     pc_list = []
     for(_, _, files) in walk(path):
@@ -78,10 +78,15 @@ def open_pc_from_file(path: str, bplt=False) -> np.ndarray:
 
                 pc_list.append(pc)
 
+                if resave['resave']:
+                    pc = pc[::resave['resample']]
+                    np.save(full_path + '_resaved.npy', pc, allow_pickle=True)
+
             except Exception as e:
                 print(f"{e} ---> {full_path}")
     
     assert len(pc_list) > 0, "[ERROR OPEN PC FILE] Empty list!!!" 
+
     return pc_list
 
 ############## surface file management ############
