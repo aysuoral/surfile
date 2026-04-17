@@ -401,7 +401,7 @@ def merge_and_downsample_point_cloud(pc1: np.ndarray, pc2: np.ndarray, voxel_siz
 @ensure_o3d_pc
 def show_point_cloud(point_clouds: list[o3d.geometry.PointCloud], colors="normal"):
     if colors is not None:
-        point_clouds = assign_defined_colors_to_point_clouds(point_clouds, colors)
+        point_clouds = assign_defined_colors_to_point_clouds(point_clouds, colors=colors)
     o3d.visualization.draw_geometries(point_clouds, point_show_normal=False)
 
 @ensure_o3d_pc
@@ -416,27 +416,31 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
     colors : list | None | str
         The colors, can be strings, rgb tuples, rgb vectors, color hex string, None or "normal" to color based on the point cloud's normals.
     """
-    # per colorare in base alle normali
-    if colors == "normal":
-        for i, pc in enumerate(point_clouds):
+    # init for uniform
+    num_pcs = len(point_clouds)
+    cmap = plt.get_cmap("tab10")  # pastel1, pastel2, Accent
+    unicolors = [cmap(j % 10) for j in range(num_pcs)]
+    
+    for i, pc in enumerate(point_clouds):
+        if colors == "normal":
+            print('Painting normal')
             pc.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=20))
             # pc.orient_normals_consistent_tangent_plane(10)
             # pc.orient_normals_to_align_with_direction([1, 0, 0])
             normals = np.asarray(pc.normals)
 
-            colors = (normals + 1) / 2  # da [-1,1] a [0,1]
-            pc.colors = o3d.utility.Vector3dVector(colors)
-        return point_clouds
+            ncolors = (normals + 1) / 2  # da [-1,1] a [0,1]
+            pc.colors = o3d.utility.Vector3dVector(ncolors)
 
-    elif colors == "uniform":
-        num_pcs = len(point_clouds)
-        cmap = plt.get_cmap("tab10")  # pastel1, pastel2, Accent
-        colors = [cmap(i % 10) for i in range(num_pcs)]
+        elif colors == "uniform":
+            print('Painting uniform')
+            raw_color = unicolors[i % len(unicolors)]
+            rgb_color = np.asarray(mcolors.to_rgb(raw_color))
+            
+            pc.paint_uniform_color(rgb_color)
 
-        return point_clouds
-
-    else:
-        for i, pc in enumerate(point_clouds):
+        else:
+            print('Painting cmap')
             pts = np.asarray(pc.points)
             z = pts[:, 2]
 
@@ -448,32 +452,12 @@ def assign_defined_colors_to_point_clouds(point_clouds: list[o3d.geometry.PointC
             else:
                 z_norm = (z - z_min) / (z_max - z_min)
 
-            cmap = plt.get_cmap(colors)   # you can also try "turbo"
+            cmap = plt.get_cmap(colors)  # you can also try "turbo"
             rgb = cmap(z_norm)[:, :3]
-
             pc.colors = o3d.utility.Vector3dVector(rgb)
-
-            return point_clouds
-
-        for i, pc in enumerate(point_clouds):
-            raw_color = colors[i % len(colors)]
-            rgb_color = np.asarray(mcolors.to_rgb(raw_color))
-            
-            pc.paint_uniform_color(rgb_color)
-
-        return point_clouds
-    
-    else:
-        for i, pc in enumerate(point_clouds):
-            z = np.asarray(pc.points)[:, 2]
-            n1 = (z - z.min()) / (z.max() - z.min())
-            p = np.asarray(pc.points)
-            n2 = np.linalg.norm(p - np.mean(p, axis=0), axis=1) 
-            n2 = (n2 - n2.min()) / (n2.max() - n2.min())
-            cc = plt.get_cmap(colors)(n2 * n1)[:, :3]
-            pc.colors = o3d.utility.Vector3dVector(cc)
         
         return point_clouds
+    
 
 class Isolator():
     geometrical: str = 'geometrical'
@@ -500,7 +484,7 @@ class Isolator():
     
     @staticmethod
     def plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts): 
-        show_point_cloud([fixed_subset, moving_subset], colors=None)
+        show_point_cloud([fixed_subset, moving_subset], colors='uniform')
 
     @staticmethod
     def isolate_common_points_geometrical(fixed_pts: np.ndarray, moving_pts: np.ndarray, stitchprc=80, bplt=False):
@@ -534,14 +518,14 @@ class Isolator():
         if 'y' not in axes: y_mM = [-np.inf, +np.inf]
         if 'z' not in axes: z_mM = [-np.inf, +np.inf]
 
-        make_mask = lambda pts: (
+        make_selected_points = lambda pts: (
             (pts[:, 0] >= x_mM[0]) & (pts[:, 0] <= x_mM[1]) &
             (pts[:, 1] >= y_mM[0]) & (pts[:, 1] <= y_mM[1]) &
             (pts[:, 2] >= z_mM[0]) & (pts[:, 2] <= z_mM[1])
         )
 
-        fixed_subset = fixed_pts[make_mask(fixed_pts)]
-        moving_subset = moving_pts[make_mask(moving_pts)]
+        fixed_subset = fixed_pts[make_selected_points(fixed_pts)]
+        moving_subset = moving_pts[make_selected_points(moving_pts)]
             
         if bplt: Isolator.plot_isolated_areas(fixed_subset, moving_subset, fixed_pts, moving_pts)
 
@@ -620,7 +604,7 @@ class Isolator():
             vis.add_geometry(pcd_o3d)
 
             render_option = vis.get_render_option()
-            render_option.point_size = 0.5
+            render_option.point_size = 8
 
             vis.run()
             vis.destroy_window()
@@ -676,11 +660,11 @@ def KDTree_mutual_diffs(fixed_points, moving_points):
     dist_f2m, idx_f2m = moving_tree.query(fixed_points, k=1, workers= -1)
     dist_m2f, idx_m2f = fixed_tree.query(moving_points, k=1, workers= -1)
 
-    mask = (np.arange(len(fixed_points)) == idx_m2f[idx_f2m])
-    if not np.any(mask):
+    selected_points = (np.arange(len(fixed_points)) == idx_m2f[idx_f2m])
+    if not np.any(selected_points):
         return float('inf')
     
-    diffs = fixed_points[mask] - moving_points[idx_f2m[mask]]
+    diffs = fixed_points[selected_points] - moving_points[idx_f2m[selected_points]]
     return diffs
 
 def _composeFigure(left, right, T, R=None, support=None, sp=20):
@@ -926,24 +910,46 @@ class SurfaceStitcher:
 
             fixed = np.vstack([fixed, moved])
 
+        point_clouds_T = [point_clouds[0]] + point_clouds_T
+
         if bplt:
-            show_point_cloud([fixed], colors="height")
-            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="height")
+            show_point_cloud([fixed], colors="viridis")
+            show_point_cloud(point_clouds_T, colors="viridis")
 
         return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchManual(point_clouds: list[np.ndarray], radius=5,  bplt=False, save_transform=None):
+    def stitchManual(point_clouds: list[np.ndarray], points_in_sphere=100,  bplt=False, save_transform=None):
 
-        def get_patch(cloud, center, r):
-            dists = np.linalg.norm(cloud - center, axis=1)
-            print(f"get_patch found {len(mask := (cloud[dists < r]))} points near selected point ({center})")
-            mean_patch_point = np.mean(mask, axis=0)
+        def get_n_closest_points(pcd, center):
+            # n_points = pcd.shape[0]
+            # auto_radius = (n_points / 100) * 0.05
+            # print(f"RADIUS: {auto_radius}")
+            tmp = pcd - center
+            modules = np.linalg.norm(tmp, axis=1)
+            indices = np.argsort(modules)[:points_in_sphere]
+            
+            return indices
+
+        def get_patch(cloud, center):
+            mean_patch_point = np.mean(cloud[get_n_closest_points(cloud, center)], axis=0)
             return mean_patch_point
         
         def optimize(fixed, moving):
-            fp, mp = Isolator.isolate_manual(fixed, moving)
+
+            voxel_size = 100
+
+            fixed_o3d = pcd_to_o3d_pcd(fixed)
+            moving_o3d = pcd_to_o3d_pcd(moving)
+
+            fp_d = fixed_o3d.voxel_down_sample(voxel_size)
+            mp_d = moving_o3d.voxel_down_sample(voxel_size)
+
+            fp_d = np.asarray(fp_d.points)
+            mp_d = np.asarray(mp_d.points)
+            
+            fp, mp = Isolator.isolate_manual(fp_d, mp_d)
             
             if len(fp) != len(mp):
                 raise RuntimeError("[ERROR MANUAL] Select same amount of points from left and right")
@@ -955,8 +961,8 @@ class SurfaceStitcher:
             moving_patches = []
 
             for pf, pm in zip(fp, mp):
-                fixed_patches.append(get_patch(fixed, pf, radius))
-                moving_patches.append(get_patch(moving, pm, radius))
+                fixed_patches.append(get_patch(fixed, pf))
+                moving_patches.append(get_patch(moving, pm))
 
             fp = np.vstack(fixed_patches)
             mp = np.vstack(moving_patches)
@@ -980,8 +986,8 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, moved])
 
         if bplt: 
-            show_point_cloud([fixed], colors="height")
-            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="height")
+            show_point_cloud([fixed], colors="viridis")
+            show_point_cloud([point_clouds[0]] + point_clouds_T, colors="viridis")
 
         return fixed, point_clouds_T
 
@@ -1074,6 +1080,7 @@ class SurfaceStitcher:
                 
                 npoints.append(len(diffs))
                 rmses.append(rmse)
+                print("one iteration has been done")
                 return rmse
 
             space = [
@@ -1391,9 +1398,9 @@ class SurfaceStitcher:
             temp = moving_pts.copy()
             temp[:, :2] += [tx, ty]
 
-            mask_f = (fixed_pts[:, 0] >= temp[:, 0].min()) & (fixed_pts[:, 0] <= temp[:, 0].max()) & (fixed_pts[:, 1] >= temp[:, 1].min()) & (fixed_pts[:, 1] <= temp[:, 1].max())
-            mask_m = (temp[:, 0] >= fixed_pts[:, 0].min()) & (temp[:, 0] <= fixed_pts[:, 0].max()) & (temp[:, 1] >= fixed_pts[:, 1].min()) & (temp[:, 1] <= fixed_pts[:, 1].max())
-            tz = np.median(fixed_pts[mask_f, 2]) - np.median(temp[mask_m, 2])
+            selected_points_f = (fixed_pts[:, 0] >= temp[:, 0].min()) & (fixed_pts[:, 0] <= temp[:, 0].max()) & (fixed_pts[:, 1] >= temp[:, 1].min()) & (fixed_pts[:, 1] <= temp[:, 1].max())
+            selected_points_m = (temp[:, 0] >= fixed_pts[:, 0].min()) & (temp[:, 0] <= fixed_pts[:, 0].max()) & (temp[:, 1] >= fixed_pts[:, 1].min()) & (temp[:, 1] <= fixed_pts[:, 1].max())
+            tz = np.median(fixed_pts[selected_points_f, 2]) - np.median(temp[selected_points_m, 2])
             # if isolator != None:
             #     fix_sub, temp_sub = isolator.apply_isolator(fixed_pts, temp, bplt=bplt)
 
