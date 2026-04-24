@@ -161,6 +161,7 @@ def pcd_to_surface(pcds: list[np.ndarray], dx, dy, force_same_size=True, bplt=Fa
                 
         # Average the bins and fill NaNs
         z_sum = np.divide(z_sum, counts, out=np.zeros_like(z_sum), where=counts!=0)
+        
         mean_val = np.nanmean(z_pts)
         z_sum[counts == 0] = mean_val
         
@@ -171,11 +172,12 @@ def pcd_to_surface(pcds: list[np.ndarray], dx, dy, force_same_size=True, bplt=Fa
         coords = np.array([
             (gy - y_min) / dy, 
             (gx - x_min) / dx
-        ])
+        ])[:, 0:-1, 0:-1]
         
-        print(f'[INFO PCD_TO_SUR] Converting pc using spacings dx: {dx:.3f} um, dy: {dy:.3f} um')
+        print(f'[INFO PCD_TO_SUR] Converting pc using spacings dx: {dx:.3f} um, dy: {dy:.3f} um, coords shape: {coords.shape}, mask shape: {counts.shape}')
         # order=3 is equivalent to cubic interpolation
         z_map = ndimage.map_coordinates(z_sum, coords, order=1, mode='nearest')
+        z_map = np.ma.array(z_map, mask=(counts == 0))
 
         z_maps.append(z_map)
 
@@ -1000,7 +1002,7 @@ class SurfaceStitcher:
         if bplt:
             # show_point_clouds([fixed], colors="uniform")
             # show_point_clouds(point_clouds_T, colors="normal")
-            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
+            compare_point_clouds([[fixed], point_clouds_T], ["betternormal", "uniform"])
 
         return fixed, point_clouds_T
 
@@ -1069,8 +1071,8 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, moved])
 
         if bplt: 
-            show_point_clouds([fixed], colors="viridis")
-            show_point_clouds(point_clouds_T, colors="uniform")
+            show_point_clouds([fixed], colors=None)
+            show_point_clouds(point_clouds_T, colors=None)
 
         return fixed, point_clouds_T
 
@@ -1215,8 +1217,6 @@ class SurfaceStitcher:
                 bx.grid(True)
 
         if bplt:
-            # show_point_clouds([fixed_pc], colors='normal')
-            # show_point_clouds(point_clouds_T, colors='uniform')
             compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
 
         return fixed, point_clouds_T
@@ -1309,7 +1309,7 @@ class SurfaceStitcher:
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchFGR(point_clouds_T: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, save_transform, bplt=False):
+    def stitchFGR(point_clouds: list[np.ndarray], voxel_size: float, thresholder: Thresholder, isolator: None | Isolator, save_transform, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
             [fixed_scaled, moving_scaled], scales = rescale_point_cloud([fixed_pts, moving_pts])
@@ -1371,33 +1371,33 @@ class SurfaceStitcher:
 
             return aligned
 
-        fixed = np.asarray(point_clouds_T[0])
+        fixed = np.asarray(point_clouds[0])
+        point_clouds_T = [point_clouds[0]]
 
-        for i, pc in enumerate(point_clouds_T[1:]):
+        for i, pc in enumerate(point_clouds[1:]):
             moving = np.asarray(pc)
             print(f"[INFO FGR] Optimizing image {i}")
             optimized_moving = optimize(fixed, moving)
+            point_clouds_T.append(optimized_moving)
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
-            show_point_clouds([fixed])
+            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
 
-        return fixed
+        return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchCorrelation(point_clouds_T: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, save_transform=None, bplt=False):
+    def stitchCorrelation(point_clouds: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, save_transform=None, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
 
             if isolator != None:
-                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts, bplt=bplt)
+                fixed_subset, moving_subset = isolator.apply_isolator(fixed_pts, moving_pts, bplt=False)
             else:
                 fixed_subset, moving_subset = fixed_pts, moving_pts
 
-            fixed_surf, moving_surf = pcd_to_surface([fixed_subset, moving_subset], dx, dy, True, bplt=True)
-
-            plt.show()
+            fixed_surf, moving_surf = pcd_to_surface([fixed_subset, moving_subset], dx, dy, force_same_size=True, bplt=True)
 
             print('shapes:', fixed_surf.Z.shape, moving_surf.Z.shape)
 
@@ -1411,18 +1411,41 @@ class SurfaceStitcher:
 
             if correlateDer:
                 lzone = np.diff(lzone)
-                rzone = np.diff(rzone)  
+                rzone = np.diff(rzone)
+
+            mask = np.logical_and(lzone.mask, rzone.mask)
+            plt.figure()
+            plt.imshow(mask)
+            plt.show()
 
             shift, _, _ = phase_cross_correlation(
                 lzone,
                 rzone,
-                upsample_factor=10
+                upsample_factor=10,
+                reference_mask=np.logical_not(mask)
             )
+
 
             shift_y, shift_x = shift
 
             tx = shift_x * dx
             ty = shift_y * dy
+
+            # print("shift:", shift)
+            # print("shift tx ty only:", shift_x * dx, shift_y * dy)
+            # print("fixed subset min:", fixed_subset[:, 0].min(), fixed_subset[:, 1].min())
+            # print("moving subset min:", moving_subset[:, 0].min(), moving_subset[:, 1].min())
+
+            # origin_tx = fixed_subset[:, 0].min() - moving_subset[:, 0].min()
+            # origin_ty = fixed_subset[:, 1].min() - moving_subset[:, 1].min()
+
+            # print("origin tx ty:", origin_tx, origin_ty)
+
+            # tx = origin_tx + shift_x * dx
+            # ty = origin_ty + shift_y * dy
+
+            # print("final tx ty:", tx, ty)
+
 
             if bplt:
                 fig, (ax, bx) = plt.subplots(nrows=1, ncols=2)
@@ -1432,54 +1455,6 @@ class SurfaceStitcher:
                 bx.set_title("rzone")
                 funct.persFig([ax, bx], xlab='x [pixels]', ylab='y [pixels]', gridcol='none')
                 plt.show()
-
-
-
-            # center_x, center_y = lzone.shape[0] // 2, lzone.shape[1] // 2
-            # size_x = lzone.shape[0] * samplingPrc // 100
-            # size_y = lzone.shape[1] * samplingPrc // 100
-
-            # get_sample = lambda arr: arr[
-            # center_x - size_x // 2 : center_x + size_x // 2,
-            # center_y - size_y // 2 : center_y + size_y // 2
-            # ]
-
-            # sampleL = get_sample(lzone)
-            # sampleR = get_sample(rzone)
-
-
-
-        #     ccL = signal.correlate2d(lzone, sampleR, mode='valid')
-        #     ccR = signal.correlate2d(rzone, sampleL, mode='valid')
-
-        #     ML = np.argmax(ccL)
-        #     yML, xML = np.unravel_index(ML, ccL.shape)
-        #     print(f"[INFO COR] {ML=} {xML=} {yML=}")
-
-        #     MR = np.argmax(ccR)
-        #     yMR, xMR = np.unravel_index(MR, ccR.shape)
-        #     print(f"[INFO COR] {MR=} {xMR=} {yMR=}")
-
-        #     bestLTranslation = [ccL.shape[1] // 2 - xML, ccL.shape[0] // 2 - yML]
-        #     bestRTranslation = [ccR.shape[1] // 2 - xMR, ccR.shape[0] // 2 - yMR]
-
-        #     meanTranslation = [(bestLTranslation[i] - bestRTranslation[i]) // 2 for i in [0, 1]]
-        #     print(f"[INFO COR] {bestLTranslation=}")
-        #     print(f"[INFO COR] {bestRTranslation=}")
-        #     print(f"[INFO COR] {meanTranslation=}")
-
-        #     flippedccR = np.flip(ccR)
-        #     cross_cc = ccL * flippedccR
-
-        #     M = np.argmax(cross_cc)
-        #     yM, xM = np.unravel_index(M, cross_cc.shape)
-        #     bestMeanTranslation = [cross_cc.shape[1] // 2 - xM, cross_cc.shape[0] // 2 - yM]
-
-        #     print(f"[INFO COR] {M=} {xM=} {yM=}")
-        #     print(f"[INFO COR] {bestMeanTranslation=}")
-
-        #     tx = bestMeanTranslation[0] * dx
-        #     ty = bestMeanTranslation[1] * dy
 
             temp = moving_pts.copy()
             temp[:, :2] += [tx, ty]
@@ -1497,10 +1472,19 @@ class SurfaceStitcher:
             aligned[:, 1] += ty
             aligned[:, 2] += tz
 
-            rx = ry = rz = 0
+            # rx = ry = rz = 0
+
+            rz = 1.2  # try: -1, -0.5, 0.5, 1
+            rx = ry = 0
+
+            tr_rot = TransformParams.from_numbers(0, 0, 0, 0, 0, rz)
+            aligned = apply_transform(aligned, tr_rot)
+
 
             tr = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
             if save_transform is not None: tr.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
+
+            print(tr)
 
             print(f"before mean z = {np.mean(moving_pts[:, 2])}")
             print(f"after mean z  = {np.mean(aligned[:, 2])}")
@@ -1538,15 +1522,17 @@ class SurfaceStitcher:
 
             return aligned, [tx, ty]
 
-        fixed = np.asarray(point_clouds_T[0])
+        fixed = np.asarray(point_clouds[0])
+        point_clouds_T = [point_clouds[0]]
 
-        for i, pc in enumerate(point_clouds_T[1:]):
+        for i, pc in enumerate(point_clouds[1:]):
             moving = np.asarray(pc)
             print(f"[INFO COR] Optimizing image {i}")
             optimized_moving, _ = optimize(fixed, moving)
+            point_clouds_T.append(optimized_moving)
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
-            show_point_clouds([fixed])
+            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
 
-        return fixed
+        return fixed, point_clouds_T
