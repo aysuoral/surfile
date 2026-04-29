@@ -23,7 +23,6 @@ import pathlib
 import struct
 import matplotlib.pyplot as plt
 import os
-from os import walk
 import open3d as o3d
 import re
 
@@ -42,48 +41,57 @@ except ImportError:
 
 
 ############## point cloud file management ############
-def open_pc_from_file(path: str, resave={'resave': False, 'resample': 10}) -> np.ndarray:
+def open_pc_from_file(path: str, NM='remove', userScales=[1, 1, 1], downsample=1, resave={'resave': False, 'resample': 10}) -> np.ndarray:
 
     pc_list = []
-    for(_, _, files) in walk(path):
-        for f in files:
-            full_path = os.path.join(path, f)
+    for f in os.listdir(path):
+        full_path = os.path.join(path, f)
 
-            print(f)
+        print(f)
 
-            try:
-                if f.endswith('.txt'):
-                    with open(full_path) as f_tmp:
-                        test = f_tmp.readline()
-                        test = test.strip()
-                        parts = re.split(r"[,\s;]+", test)
+        try:
+            if f.endswith('.txt'):
+                with open(full_path) as f_tmp:
+                    test = f_tmp.readline()
+                    test = test.strip()
+                    parts = re.split(r"[,\s;]+", test)
 
-                        if len(parts) == 3:
-                        
-                            if not (len(parts[0]) == len(parts[1]) and len(parts[1]) == len(parts[2])):
-                                print("Warning: it might not be a point cloud")
+                    if len(parts) == 3:
+                    
+                        if not (len(parts[0]) == len(parts[1]) and len(parts[1]) == len(parts[2])):
+                            print("Warning: it might not be a point cloud")
 
-                            pc = np.genfromtxt(full_path, unpack=False, usecols=(0, 1, 2), delimiter=detect_csv_separator(full_path))
-                        else:
-                            raise IndexError(f"File has {len(parts)} columns...")
+                        pc = np.genfromtxt(full_path, unpack=False, usecols=(0, 1, 2), delimiter=detect_csv_separator(full_path))
+                    else:
+                        raise IndexError(f"File has {len(parts)} columns...")
 
-                elif f.endswith(".npy"):
-                    pc = np.load(full_path, allow_pickle=True)
-                
-                elif f.endswith('.stl'):
-                    mesh = o3d.io.read_triangle_mesh(full_path)
-                    pc = np.asarray(mesh.vertices)
-                else:
-                    raise TypeError("Unsupported file type...")
+            elif f.endswith(".npy"):
+                pc = np.load(full_path, allow_pickle=True)
+            
+            elif f.endswith('.stl'):
+                mesh = o3d.io.read_triangle_mesh(full_path)
+                pc = np.asarray(mesh.vertices)
+            else:
+                raise TypeError("Unsupported file type...")
 
-                pc_list.append(pc)
+            if NM == 'remove': pc = pc[~np.isnan(pc[:, 2])]
+            elif NM == 'keep': pass
+            elif NM == 'fill': pc[:, 2][np.isnan(pc[:, 2])] = np.nanmean(pc[:, 2])
 
-                if resave['resave']:
-                    pc = pc[::resave['resample']]
-                    np.save(full_path + '_resaved.npy', pc, allow_pickle=True)
+            pc[:, 0]  *= userScales[0]
+            pc[:, 1]  *= userScales[1]
+            pc[:, 2]  *= userScales[2]
 
-            except Exception as e:
-                print(f"{e} ---> {full_path}")
+            pc = pc[::downsample]
+
+            pc_list.append(pc)
+
+            if resave['resave']:
+                pc = pc[::resave['resample']]
+                np.save(full_path + '_resaved.npy', pc, allow_pickle=True)
+
+        except Exception as e:
+            print(f"{e} ---> {full_path}")
     
     assert len(pc_list) > 0, "[ERROR OPEN PC FILE] Empty list!!!" 
 
@@ -94,7 +102,7 @@ def open_sur_from_folder(folder_path):
     surfaces =  []
 
     for (_, _, files) in walk(folder_path):
-        pickled_files = [f for f in files if f.endswith("_pikled.npy")]
+        pickled_files = [f for f in files if f.endswith("_pikled.npy") or f.endswith("_resaved.npy")]
 
         if len(pickled_files) > 0:
             for f in pickled_files:

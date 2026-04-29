@@ -242,7 +242,7 @@ class TransformParams:
         with open(filename, "r") as f:
             riga = list(f)[header + tr_n]
         riga = riga[3:].strip().replace(',', ' ')
-        values = list(map(float, riga.split()))
+        values = np.array(list(map(float, riga.split())))
         instance.tx, instance.ty, instance.tz, instance.rx, instance.ry, instance.rz = values
         return instance
     
@@ -622,7 +622,7 @@ class Isolator():
         return fixed_subset, moving_subset
     
     @staticmethod
-    def isolate_common_points_kdtree(fixed_pts: np.ndarray, moving_pts: np.ndarray, max_distance: float=None, bplt=False):
+    def isolate_common_points_kdtree(fixed_pts: np.ndarray, moving_pts: np.ndarray, max_distance: float=None, bins_after_max=1, bplt=False):
         A_to_B = lambda A, B: cKDTree(B).query(A, k=1)
 
         dist_f2m, _ = A_to_B(fixed_pts, moving_pts)
@@ -631,7 +631,7 @@ class Isolator():
         if max_distance is None:
             dist_hist, dist_bins = np.histogram(np.hstack((dist_f2m, dist_m2f)), 50)
 
-            max_distance = dist_bins[np.nanargmax(dist_hist) + 1]
+            max_distance = dist_bins[np.nanargmax(dist_hist) + bins_after_max]
 
             if bplt:
                 fig, ax = plt.subplots()
@@ -1105,18 +1105,17 @@ class SurfaceStitcher:
         print(f"[INFO ROBOT STITCH] Loaded {len(robot_trans)} robot transformations for {len(point_clouds_clean)} surfaces")
         
         point_clouds_T = []
-        fixed_ref = point_clouds_clean[0]
+        fixed = point_clouds_clean[0]
         for pc, trasf in zip(point_clouds_clean, robot_trans):
             pts = pc
             pts_T = apply_transform(pts, trasf, params0=robot_trans[0])
             point_clouds_T.append(pts_T)
-            fixed_ref = merge_and_downsample_point_cloud(fixed_ref, pts_T)
+            fixed = merge_and_downsample_point_cloud(fixed, pts_T)
 
         if bplt: 
-            show_point_clouds([fixed_ref])
-            show_point_clouds(point_clouds_T, colors=None)
+            compare_point_clouds([[fixed], point_clouds_T], ["afmhot", "uniform"])
         
-        return fixed_ref, point_clouds_T    
+        return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
@@ -1149,7 +1148,7 @@ class SurfaceStitcher:
             aligning and merging all point clouds
         """
         def optimize(fixed_pts, moving_pts):
-            U_tx, U_ty, U_tz = 10, 10, 10  
+            U_tx, U_ty, U_tz = 56, 56, 56  
             U_theta = 0.5
 
             # tx ty tz rx ry rz
@@ -1217,7 +1216,7 @@ class SurfaceStitcher:
                 bx.grid(True)
 
         if bplt:
-            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
+            compare_point_clouds([[fixed], point_clouds_T], ["viridis", "uniform"])
 
         return fixed, point_clouds_T
     
@@ -1303,7 +1302,7 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
-            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
+            compare_point_clouds([[fixed], point_clouds_T], ["viridis", "uniform"])
 
         return fixed, point_clouds_T
 
@@ -1382,13 +1381,13 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
-            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
+            compare_point_clouds([[fixed], point_clouds_T], ["viridis", "uniform"])
 
         return fixed, point_clouds_T
 
     @staticmethod
     @ensure_numpy_pcd
-    def stitchCorrelation(point_clouds: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, samplingPrc, correlateDer=True, save_transform=None, bplt=False):
+    def stitchCorrelation(point_clouds: list[np.ndarray], dx: float, dy: float, isolator: None | Isolator, correlateDer=True, save_transform=None, bplt=False):
 
         def optimize(fixed_pts, moving_pts):
 
@@ -1397,7 +1396,7 @@ class SurfaceStitcher:
             else:
                 fixed_subset, moving_subset = fixed_pts, moving_pts
 
-            fixed_surf, moving_surf = pcd_to_surface([fixed_subset, moving_subset], dx, dy, force_same_size=True, bplt=True)
+            fixed_surf, moving_surf = pcd_to_surface([fixed_subset, moving_subset], dx, dy, force_same_size=True, bplt=False)
 
             print('shapes:', fixed_surf.Z.shape, moving_surf.Z.shape)
 
@@ -1413,10 +1412,9 @@ class SurfaceStitcher:
                 lzone = np.diff(lzone)
                 rzone = np.diff(rzone)
 
-            mask = np.logical_and(lzone.mask, rzone.mask)
+            mask = np.logical_or(lzone.mask, rzone.mask)
             plt.figure()
-            plt.imshow(mask)
-            plt.show()
+            plt.imshow(mask, origin='lower')
 
             shift, _, _ = phase_cross_correlation(
                 lzone,
@@ -1425,27 +1423,10 @@ class SurfaceStitcher:
                 reference_mask=np.logical_not(mask)
             )
 
-
             shift_y, shift_x = shift
 
             tx = shift_x * dx
             ty = shift_y * dy
-
-            # print("shift:", shift)
-            # print("shift tx ty only:", shift_x * dx, shift_y * dy)
-            # print("fixed subset min:", fixed_subset[:, 0].min(), fixed_subset[:, 1].min())
-            # print("moving subset min:", moving_subset[:, 0].min(), moving_subset[:, 1].min())
-
-            # origin_tx = fixed_subset[:, 0].min() - moving_subset[:, 0].min()
-            # origin_ty = fixed_subset[:, 1].min() - moving_subset[:, 1].min()
-
-            # print("origin tx ty:", origin_tx, origin_ty)
-
-            # tx = origin_tx + shift_x * dx
-            # ty = origin_ty + shift_y * dy
-
-            # print("final tx ty:", tx, ty)
-
 
             if bplt:
                 fig, (ax, bx) = plt.subplots(nrows=1, ncols=2)
@@ -1456,35 +1437,24 @@ class SurfaceStitcher:
                 funct.persFig([ax, bx], xlab='x [pixels]', ylab='y [pixels]', gridcol='none')
                 plt.show()
 
-            temp = moving_pts.copy()
-            temp[:, :2] += [tx, ty]
-
-            selected_points_f = (fixed_pts[:, 0] >= temp[:, 0].min()) & (fixed_pts[:, 0] <= temp[:, 0].max()) & (fixed_pts[:, 1] >= temp[:, 1].min()) & (fixed_pts[:, 1] <= temp[:, 1].max())
-            selected_points_m = (temp[:, 0] >= fixed_pts[:, 0].min()) & (temp[:, 0] <= fixed_pts[:, 0].max()) & (temp[:, 1] >= fixed_pts[:, 1].min()) & (temp[:, 1] <= fixed_pts[:, 1].max())
-            tz = np.median(fixed_pts[selected_points_f, 2]) - np.median(temp[selected_points_m, 2])
-            # if isolator != None:
-            #     fix_sub, temp_sub = isolator.apply_isolator(fixed_pts, temp, bplt=bplt)
-
-            # tz = np.median(fix_sub[:, 2]) - np.median(temp_sub[:, 2])
-
             aligned = moving_pts.copy()
             aligned[:, 0] += tx
             aligned[:, 1] += ty
+
+            # temp = moving_pts.copy()
+            # temp[:, :2] += [tx, ty]
+
+            # selected_points_f = (fixed_pts[:, 0] >= temp[:, 0].min()) & (fixed_pts[:, 0] <= temp[:, 0].max()) & (fixed_pts[:, 1] >= temp[:, 1].min()) & (fixed_pts[:, 1] <= temp[:, 1].max())
+            # selected_points_m = (temp[:, 0] >= fixed_pts[:, 0].min()) & (temp[:, 0] <= fixed_pts[:, 0].max()) & (temp[:, 1] >= fixed_pts[:, 1].min()) & (temp[:, 1] <= fixed_pts[:, 1].max())
+            # tz = np.median(fixed_pts[selected_points_f, 2]) - np.median(temp[selected_points_m, 2])
+
+            fix_sub, temp_sub = isolator.isolate_common_points_kdtree(fixed_pts, aligned, bins_after_max=1, bplt=True)
+            tz = np.nanmean(fix_sub[:, 2]) - np.nanmean(temp_sub[:, 2])
+
             aligned[:, 2] += tz
 
-            # rx = ry = rz = 0
-
-            rz = 1.2  # try: -1, -0.5, 0.5, 1
-            rx = ry = 0
-
-            tr_rot = TransformParams.from_numbers(0, 0, 0, 0, 0, rz)
-            aligned = apply_transform(aligned, tr_rot)
-
-
-            tr = TransformParams.from_numbers(tx, ty, tz, rx, ry, rz)
+            tr = TransformParams.from_numbers(tx, ty, tz, 0, 0, 0)
             if save_transform is not None: tr.to_pickle(os.path.join(save_transform, f"{i}.pkl"))
-
-            print(tr)
 
             print(f"before mean z = {np.mean(moving_pts[:, 2])}")
             print(f"after mean z  = {np.mean(aligned[:, 2])}")
@@ -1533,6 +1503,6 @@ class SurfaceStitcher:
             fixed = np.vstack([fixed, optimized_moving])
 
         if bplt:
-            compare_point_clouds([[fixed], point_clouds_T], ["normal", "uniform"])
+            compare_point_clouds([[fixed], point_clouds_T], ["viridis", "uniform"])
 
         return fixed, point_clouds_T
